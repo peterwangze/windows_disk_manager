@@ -85,6 +85,45 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), b"previous")
         self.assertFalse(list(self.output.parent.glob(".scan-*")))
 
+    def test_parallel_subtrees_match_sequential_rows(self):
+        from benchmark_scan import snapshot
+        branches = self.root / "outer" / "inner"
+        branches.mkdir(parents=True)
+        data = self.root / "common.bin"
+        data.write_bytes(b"x" * 12000)
+        for i in range(64):
+            leaf = branches / str(i) / "nested"
+            leaf.mkdir(parents=True)
+            os.link(data, leaf / "copy.bin")
+        link = branches / "31" / "junction"
+        _winapi.CreateJunction(str(self.root), str(link))
+        self.addCleanup(os.rmdir, link)
+        exclude = branches / "0" / "nested"
+        sequential = self.output.with_name("sequential.sqlite")
+        with patch.object(scan, "supports_parallel_reads", return_value=False), patch.object(scan, "emit"):
+            scan.run(sequential, exclude, self.root)
+        with patch.object(scan, "supports_parallel_reads", return_value=True), \
+                patch.object(scan.os, "cpu_count", return_value=16), patch.object(scan, "emit"):
+            scan.run(self.output, exclude, self.root)
+        self.assertEqual(snapshot(self.output), snapshot(sequential))
+        with closing(sqlite3.connect(self.output)) as db:
+            self.assertEqual(db.execute("SELECT duplicate_files FROM volumes").fetchone(), (63,))
+            self.assertEqual(db.execute("SELECT files,flags FROM dirs WHERE parent IS NULL").fetchone(), (64, 8))
+
+    def test_largest_shard_preserves_both_roots(self):
+        other = self.root.parent / "larger"
+        other.mkdir()
+        (self.root / "only").touch()
+        for i in range(160):
+            (other / (str(i) + "-entry")).touch()
+        with patch.object(scan, "mounted_roots", return_value=[str(self.root), str(other)]), patch.object(scan, "emit"):
+            scan.run(self.output)
+        with closing(sqlite3.connect(self.output)) as db:
+            rows = db.execute("SELECT name,files FROM dirs WHERE parent IS NULL")
+            self.assertEqual(dict(rows), {str(self.root): 1, str(other): 160})
+            self.assertEqual(db.execute("SELECT count(*) FROM entries").fetchone(), (161,))
+            self.assertEqual(db.execute("SELECT count(*) FROM volumes").fetchone(), (2,))
+
     @unittest.skipUnless(os.environ.get("WDM_SCANNER_EXE"), "set WDM_SCANNER_EXE to a frozen scanner")
     def test_frozen_workers_start_and_cancel(self):
         exe = os.environ["WDM_SCANNER_EXE"]

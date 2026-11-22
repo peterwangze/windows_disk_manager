@@ -12,7 +12,7 @@ namespace UsageTree
         private const string Prefix = ".wdm-run-";
         private const string Marker = "owner.wdm";
         private static readonly Regex TempName = new Regex(@"^\.scan-[a-z0-9_]{8}$", RegexOptions.CultureInvariant);
-        private static readonly Regex Shard = new Regex(@"^(report|volume-[0-9]+)\.sqlite(-journal|-wal|-shm)?$", RegexOptions.CultureInvariant);
+        private static readonly Regex Shard = new Regex(@"^(report|volume-[0-9]+|branch-[0-9]+-[0-9]+)\.sqlite(-journal|-wal|-shm)?$", RegexOptions.CultureInvariant);
 
         private static string Signature(string id) { return "WindowsDiskManager staging v1 " + id; }
         internal static string Create(string parent)

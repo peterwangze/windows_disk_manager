@@ -121,7 +121,8 @@ namespace UsageTree
             string data = Environment.GetEnvironmentVariable("WDM_DATA_DIR");
             data = Path.GetFullPath(String.IsNullOrWhiteSpace(data) ? Path.Combine(local, "WindowsDiskManager") : data).TrimEnd('\\');
             string installed = Path.Combine(local, @"Programs\WindowsDiskManager");
-            if (Within(path, data) || Within(data, path) || Within(path, installed) || Within(installed, path))
+            if (Within(path, data) || Within(data, path) || Within(path, installed) || Within(installed, path) ||
+                Within(path, Path.Combine(app, "scanner-runtime")))
                 throw new IOException("此项目包含程序或扫描数据，已跳过。");
             foreach (string name in new[] { "WindowsDiskManager.exe", "WindowsDiskManager.exe.config", "DiskScanner.exe", "DiskScanner.exe.config" })
                 if (Within(Path.Combine(app, name), path)) throw new IOException("此项目包含正在使用的程序，已跳过。");

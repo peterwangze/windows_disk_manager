@@ -10,7 +10,7 @@ Windows 磁盘空间管理器用一棵可展开的文件树展示每个磁盘、
 
 从 [最新的 GitHub Release](https://github.com/peterwangze/windows_disk_manager/releases/latest) 下载文件名以 `-win-x64-Setup.exe` 结尾的安装程序，双击安装。之后可从开始菜单搜索「磁盘空间管理器」。安装作用于当前 Windows 用户，升级会保留已有的扫描快照。
 
-适用于安装了 .NET Framework 4.8 的 64 位 Windows 10 / 11。需要便携运行时，可下载同一 Release 的 ZIP 包，解压后运行 `WindowsDiskManager.exe`，将同目录的 `DiskScanner.exe` 保留在原位。
+适用于安装了 .NET Framework 4.8 的 64 位 Windows 10 / 11。使用便携版时，请完整解压同一 Release 的 ZIP 包，保留 `DiskScanner.exe` 和 `scanner-runtime` 文件夹，然后运行 `WindowsDiskManager.exe`。
 
 ## 版本与更新
 
@@ -21,6 +21,7 @@ Windows 磁盘空间管理器用一棵可展开的文件树展示每个磁盘、
 ## 浏览、刷新和删除
 
 - 首次启动会扫描本机磁盘，以后启动时直接显示上次完成的快照。点击「刷新」或按 **F5** 后，进度面板会显示当前阶段、已扫描目录数、文件数和耗时。扫描期间文件树和操作按钮暂时置灰。点击「取消扫描」或按 **Esc** 可返回上一次快照。扫描成功后，文件树会自动显示新结果。
+- 刷新会重新读取文件系统。对于 Windows 确认为无寻道延迟的固定磁盘，较大的目录树会分给多个后台进程扫描。扫描器根据处理器数量与磁盘数限制并发，机械盘、网络盘和类型未知的设备逐目录读取。
 - 展开目录可查看文件与子目录的占用，鼠标悬停在大小上可查看精确字节数。每行的「打开」或「定位」按钮可在资源管理器中打开目录或选中文件。
 - 勾选文件或目录后，点击「移入回收站」，在确认窗口核对完整路径。选择目录会包含其中的内容，重复勾选的子项只处理一次。「查看处理结果」会列出每一项的结果。成功移入回收站的内容可从 Windows 回收站还原，清空回收站后相应空间才会释放。
 - 快照生成后发生变化的项目会在删除前重新核对身份。磁盘根目录、管理器自身使用的文件和无法确认身份的项目受保护。
@@ -61,3 +62,5 @@ powershell.exe -NoProfile -STA -File .\tests\ui-smoke.ps1
 powershell.exe -NoProfile -STA -File .\tests\scan-feedback.ps1
 powershell.exe -NoProfile -File .\tests\update-service.ps1
 ```
+
+对比扫描性能时，可用 `python tests/benchmark_scan.py --baseline <旧版扫描器.exe> --candidate <新版扫描器.exe> --root <稳定的测试目录>`。默认交替运行三轮，比较端到端耗时中位数，并逐项核对路径、占用、文件标识和目录汇总。

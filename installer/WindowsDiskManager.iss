@@ -39,6 +39,7 @@ Name: "zh"; MessagesFile: "ChineseSimplified.isl"
 Source: "{#ProductDir}\WindowsDiskManager.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProductDir}\WindowsDiskManager.exe.config"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProductDir}\DiskScanner.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ProductDir}\scanner-runtime\*"; DestDir: "{app}\scanner-runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ProductDir}\licenses\Python.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#ProductDir}\licenses\PyInstaller.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "ChineseSimplified-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion

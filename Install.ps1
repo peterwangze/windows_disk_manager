@@ -6,6 +6,9 @@ if (!(Test-Path -LiteralPath (Join-Path $payload 'WindowsDiskManager.exe') -Path
     $payload = Join-Path $PSScriptRoot 'dist\WindowsDiskManager'
 }
 $files = @('WindowsDiskManager.exe', 'WindowsDiskManager.exe.config', 'DiskScanner.exe', 'licenses\Python.txt', 'licenses\PyInstaller.txt')
+$runtime = Join-Path $payload 'scanner-runtime'
+if (!(Test-Path -LiteralPath "$runtime\base_library.zip" -PathType Leaf)) { throw 'The packaged scanner runtime is missing.' }
+$files += @(Get-ChildItem -LiteralPath $runtime -File -Recurse | ForEach-Object { $_.FullName.Substring($payload.Length + 1) })
 foreach ($file in $files) {
     if (!(Test-Path -LiteralPath (Join-Path $payload $file) -PathType Leaf)) { throw "Missing release file: $file" }
 }
@@ -19,6 +22,7 @@ foreach ($file in $files) {
     $target = Join-Path $installDir $file
     $hash = (Get-FileHash -LiteralPath $source).Hash
     if ((Test-Path -LiteralPath $target) -and ((Get-FileHash -LiteralPath $target).Hash -eq $hash)) { continue }
+    $null = New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force
     Copy-Item -LiteralPath $source -Destination $target -Force
     if ((Get-FileHash -LiteralPath $target).Hash -ne $hash) { throw "Copy verification failed: $file" }
 }

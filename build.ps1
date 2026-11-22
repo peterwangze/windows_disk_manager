@@ -33,8 +33,19 @@ if ($Part -in 'All','Viewer') {
 if ($Part -in 'All','Scanner') {
     & $Python -c "import struct, sys; sys.exit(0 if struct.calcsize('P') == 8 else 'Use 64-bit Python to build the scanner.')"
     if ($LASTEXITCODE -ne 0) { throw 'A 64-bit Python installation is required.' }
-    & $Python -m PyInstaller --noconfirm --noupx --onefile --console --log-level WARN --name DiskScanner --distpath $product --workpath "$build\scanner" --specpath $build "$src\scan.py"
+    $bundle = Join-Path $build 'bundled\DiskScanner'
+    & $Python -m PyInstaller --noconfirm --noupx --onedir --contents-directory scanner-runtime --console --log-level WARN --name DiskScanner --distpath "$build\bundled" --workpath "$build\scanner" --specpath $build "$src\scan.py"
     if ($LASTEXITCODE -ne 0) { throw 'Scanner compilation failed. Install PyInstaller in the selected Python environment.' }
+    Copy-Item -LiteralPath "$bundle\DiskScanner.exe" -Destination $product -Force
+    $runtime = Join-Path $product 'scanner-runtime'
+    $null = New-Item -ItemType Directory -Path $runtime -Force
+    $expected = Join-Path $PSScriptRoot 'dist\WindowsDiskManager\scanner-runtime'
+    if ((Resolve-Path -LiteralPath $runtime).Path -ne $expected -or
+        (Get-Item -LiteralPath $dist, $product, $runtime | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })) {
+        throw 'Unexpected scanner runtime build directory.'
+    }
+    & robocopy.exe "$bundle\scanner-runtime" $runtime /MIR /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw 'Failed to stage the packaged scanner runtime.' }
     $licenses = Join-Path $product 'licenses'
     $null = New-Item -ItemType Directory -Path $licenses -Force
     $pythonLicense = & $Python -c "import pathlib,sys; print(pathlib.Path(sys.base_prefix, 'LICENSE.txt'))"
@@ -55,7 +66,7 @@ if ($Part -in 'All','Package') {
         throw 'The compiled ProductVersion, FileVersion and assembly version must match AssemblyInfo.cs. Rebuild before packaging.'
     }
     $zip = Join-Path $dist "WindowsDiskManager-$version-win-x64.zip"
-    $payload = @('WindowsDiskManager.exe','WindowsDiskManager.exe.config','DiskScanner.exe','Install.ps1','licenses') |
+    $payload = @('WindowsDiskManager.exe','WindowsDiskManager.exe.config','DiskScanner.exe','scanner-runtime','Install.ps1','licenses') |
         ForEach-Object { Join-Path $product $_ }
     Compress-Archive -LiteralPath $payload -DestinationPath $zip -CompressionLevel Optimal -Force
     $pathCompiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue

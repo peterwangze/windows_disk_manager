@@ -40,6 +40,8 @@ get_drives = winfunc("GetLogicalDrives", wt.DWORD)
 get_drive_type = winfunc("GetDriveTypeW", wt.UINT, wt.LPCWSTR)
 set_error_mode = winfunc("SetErrorMode", wt.UINT, wt.UINT)
 get_legacy_info = winfunc("GetFileInformationByHandle", wt.BOOL, wt.HANDLE, wt.LPVOID)
+device_io = winfunc("DeviceIoControl", wt.BOOL, wt.HANDLE, wt.DWORD, wt.LPVOID,
+                    wt.DWORD, wt.LPVOID, wt.DWORD, ct.POINTER(wt.DWORD), wt.LPVOID)
 
 INVALID_HANDLE = ct.c_void_p(-1).value
 DIRECTORY, SPARSE, REPARSE, COMPRESSED = 0x10, 0x200, 0x400, 0x800
@@ -80,6 +82,25 @@ def native(path):
     if full.startswith("\\\\"):
         return "\\\\?\\UNC\\" + full[2:]
     return "\\\\?\\" + full
+
+
+def supports_parallel_reads(root):
+    drive = os.path.splitdrive(root)[0]
+    if len(drive) != 2 or get_drive_type(drive + "\\") != 3:
+        return False
+    volume = create_file("\\\\.\\" + drive, 0, 7, None, 3, 0, None)
+    if volume == INVALID_HANDLE:
+        return False
+    try:
+        # IOCTL_STORAGE_QUERY_PROPERTY / StorageDeviceSeekPenaltyProperty.
+        query = struct.pack("<III", 7, 0, 0)
+        descriptor = ct.create_string_buffer(64)
+        returned = wt.DWORD()
+        ok = device_io(volume, 0x002D1400, query, len(query), descriptor, len(descriptor),
+                       ct.byref(returned), None)
+        return bool(ok and returned.value >= 9 and descriptor.raw[8] == 0)
+    finally:
+        close_handle(volume)
 
 
 @contextmanager
@@ -314,83 +335,178 @@ def fallback_id(path, serial):
     return None
 
 
-def scan_volume(root, index, stride, stage, ignored, cancel_file=None):
-    started = now()
-    shard = Path(stage) / f"volume-{index}.sqlite"
-    counters = itertools.count(index + 1, stride)
+def write_forest(db, trees, root_dir, counters, ignored, cancel, progress, deferred=None, spine=None):
     buffer = ct.create_string_buffer(BUFFER_SIZE)
-    root_dir = Directory(next(counters), None, native(root), root)
-    root_dir.serial = None
-    # stack items with a parent reference allow postorder aggregation at any depth.
-    stack = [(root_dir, None, False)]
+    stack = [(tree, None, 0, False) for tree in trees]
+    excluded_names = {}
+    for path in ignored:
+        parent, name = os.path.split(path)
+        excluded_names.setdefault(parent, set()).add(name)
     files = []
     dirs = []
     dir_count = file_count = unknown = 0
     next_report = 0
-    cancel = Cancellation(cancel_file)
 
     def heartbeat():
         nonlocal next_report
         cancel.check()
         current = time.monotonic()
         if current >= next_report:
-            report("SCAN", root, dir_count, file_count)
-            next_report = current + 2
+            progress(dir_count, file_count)
+            next_report = current + 1
+
+    while stack:
+        node, parent, depth, done = stack.pop()
+        if done or node.flags & 2:
+            if spine is not None:
+                spine[node.ident] = node
+            dirs.append(node.row())
+            if parent is not None:
+                parent.include(node)
+            dir_count += 1
+        else:
+            heartbeat()
+            omitted = excluded_names.get(node.path.casefold())
+            prefix = node.path if node.path.endswith("\\") else node.path + "\\"
+            stack.append((node, parent, depth, True))
+            try:
+                for position, record in enumerate(directory_entries(node, root_dir, buffer)):
+                    if position and position % 512 == 0:
+                        heartbeat()
+                    name, logical, raw_alloc, attr, tag, fsid = record
+                    if omitted and name.casefold() in omitted:
+                        continue
+                    if fsid is None:
+                        fsid = fallback_id(prefix + name, root_dir.serial)
+                    if attr & DIRECTORY:
+                        flags = 2 if attr & REPARSE else 0
+                        child = Directory(next(counters), node.ident, prefix + name, name, flags, fsid)
+                        if deferred is not None and not flags and (depth >= 2 or len(stack) >= 512):
+                            deferred.append(child)
+                        else:
+                            stack.append((child, node, depth + 1, False))
+                        continue
+                    if attr & (SPARSE | COMPRESSED | REPARSE) or (logical and raw_alloc == 0):
+                        amount = allocation(prefix + name, logical, raw_alloc, attr, tag)
+                    else:
+                        amount = raw_alloc
+                    flags = 2 if attr & REPARSE else 0
+                    if amount is None or amount < 0:
+                        amount = None
+                        flags |= 1
+                        node.flags |= 1
+                        unknown += 1
+                    else:
+                        node.direct += amount
+                        node.total += amount
+                    node.logical += logical
+                    node.files += 1
+                    file_count += 1
+                    files.append((node.ident, name, amount, logical, flags, fsid))
+                    if len(files) >= 8192:
+                        db.executemany(INSERT_ENTRY, files)
+                        files.clear()
+            except OSError:
+                node.flags |= 1
+        if len(dirs) >= 4096:
+            db.executemany(INSERT_DIR, dirs)
+            dirs.clear()
+    db.executemany(INSERT_ENTRY, files)
+    db.executemany(INSERT_DIR, dirs)
+    progress(dir_count, file_count)
+    return dir_count, file_count, unknown
+
+
+def merge_shards(db, others):
+    for path in others:
+        db.execute("ATTACH DATABASE ? AS source", (str(path),))
+        with db:
+            db.execute("INSERT INTO dirs SELECT * FROM source.dirs")
+            db.execute("""INSERT INTO entries(parent,name,bytes,logical_bytes,flags,fsid)
+                          SELECT parent,name,bytes,logical_bytes,flags,fsid FROM source.entries""")
+            db.execute("INSERT INTO volumes SELECT * FROM source.volumes")
+        db.execute("DETACH DATABASE source")
+        Path(path).unlink()
+
+
+def scan_branches(slot, path, trees, root_dir, first_id, stride, ignored):
+    # Each child owns one SQLite file and a disjoint directory ID sequence.
+    cancel = Cancellation()
+    db = connect(path)
+    try:
+        db.set_progress_handler(cancel.interrupt_sql, 25000)
+        db.executescript(SCHEMA)
+
+        def progress(dirs, files):
+            report(slot, dirs, files)
+
+        counts = write_forest(db, trees, root_dir, itertools.count(first_id, stride), ignored, cancel, progress)
+        db.commit()
+    finally:
+        db.close()
+    return trees, counts
+
+
+def scan_partitions(trees, root_dir, first_id, stride, workers, stage, index, ignored, cancel, progress):
+    # More batches than workers let an idle worker take the next group of subtrees.
+    groups = min(workers * 4, len(trees))
+    totals = {}
+    paths, tasks = [], []
+
+    def on_progress(slot, dirs, files):
+        totals[slot] = (dirs, files)
+        progress(sum(d for d, f in totals.values()), sum(f for d, f in totals.values()))
+
+    for slot in range(groups):
+        path = Path(stage) / f"branch-{index}-{slot}.sqlite"
+        paths.append(path)
+        tasks.append((slot, path, trees[slot::groups], root_dir, first_id + slot * stride,
+                      stride * groups, ignored))
+    return paths, run_workers(scan_branches, tasks, workers, cancel, on_progress)
+
+
+def scan_volume(root, index, stride, stage, ignored, cancel_file=None):
+    started = now()
+    shard = Path(stage) / f"volume-{index}.sqlite"
+    counters = itertools.count(index + 1, stride)
+    root_dir = Directory(next(counters), None, native(root), root)
+    root_dir.serial = None
+    cancel = Cancellation(cancel_file)
+    budget = min(6, max(1, (os.cpu_count() or 2) // 2))
+    workers = max(1, min(3, budget // min(stride, 4)))
+    deferred, spine = ([], {}) if workers > 1 and supports_parallel_reads(root) else (None, None)
+
+    def progress(dirs, files):
+        report("SCAN", root, dirs, files)
 
     db = connect(shard)
     try:
         db.set_progress_handler(cancel.interrupt_sql, 25000)
         db.executescript(SCHEMA)
-        while stack:
-            heartbeat()
-            node, parent, done = stack.pop()
-            if done or node.flags & 2:
-                dirs.append(node.row())
-                if parent is not None:
-                    parent.include(node)
-                dir_count += 1
+        first_dirs, first_files, unknown = write_forest(db, [root_dir], root_dir, counters,
+                                                        ignored, cancel, progress, deferred, spine)
+        if deferred:
+            def branch_progress(dirs, files):
+                progress(first_dirs + dirs, first_files + files)
+
+            if len(deferred) >= 48:
+                db.commit()
+                paths, batches = scan_partitions(deferred, root_dir, next(counters), stride, workers,
+                                                 stage, index, ignored, cancel, branch_progress)
+                report("STAGE", f"正在合并 {root} 的目录统计")
+                merge_shards(db, paths)
             else:
-                stack.append((node, parent, True))
-                try:
-                    for position, record in enumerate(directory_entries(node, root_dir, buffer)):
-                        if position % 512 == 0:
-                            heartbeat()
-                        name, logical, raw_alloc, attr, tag, fsid = record
-                        full = os.path.join(node.path, name)
-                        if full.casefold() in ignored:
-                            continue
-                        if fsid is None:
-                            fsid = fallback_id(full, root_dir.serial)
-                        if attr & DIRECTORY:
-                            flags = 2 if attr & REPARSE else 0
-                            child = Directory(next(counters), node.ident, full, name, flags, fsid)
-                            stack.append((child, node, False))
-                            continue
-                        amount = allocation(full, logical, raw_alloc, attr, tag)
-                        flags = 2 if attr & REPARSE else 0
-                        if amount is None or amount < 0:
-                            amount = None
-                            flags |= 1
-                            node.flags |= 1
-                            unknown += 1
-                        else:
-                            node.direct += amount
-                            node.total += amount
-                        node.logical += logical
-                        node.files += 1
-                        file_count += 1
-                        files.append((node.ident, name, amount, logical, flags, fsid))
-                        if len(files) >= 8192:
-                            db.executemany(INSERT_ENTRY, files)
-                            files.clear()
-                except OSError:
-                    node.flags |= 1
-            if len(dirs) >= 4096:
-                db.executemany(INSERT_DIR, dirs)
-                dirs.clear()
-        db.executemany(INSERT_ENTRY, files)
-        db.executemany(INSERT_DIR, dirs)
-        report("SCAN", root, dir_count, file_count)
+                counts = write_forest(db, deferred, root_dir, counters, ignored, cancel, branch_progress)
+                batches = [(deferred, counts)]
+            for trees, counts in batches:
+                unknown += counts[2]
+                for tree in trees:
+                    ancestor = tree.parent
+                    while ancestor is not None:
+                        spine[ancestor].include(tree)
+                        ancestor = spine[ancestor].parent
+            db.executemany("UPDATE dirs SET bytes=?, files=?, flags=?, logical_bytes=? WHERE id=?",
+                           ((n.total, n.files, n.flags, n.logical, n.ident) for n in spine.values()))
         report("STAGE", f"正在汇总 {root} 的文件占用")
         finished = now()
         try:
@@ -452,43 +568,49 @@ def mounted_roots():
     return roots
 
 
-def drain(messages):
-    while True:
-        try:
-            event = messages.get_nowait()
-        except queue.Empty:
-            break
-        emit(*event)
-
-
-def scan_roots(roots, stage, ignored, cancel):
-    if len(roots) == 1:
-        return [scan_volume(roots[0], 0, 1, stage, ignored, cancel.path)]
+def run_workers(work, tasks, workers, cancel, receive):
     ctx = multiprocessing.get_context("spawn")
     messages, stop = ctx.Queue(), ctx.Event()
+
+    def drain():
+        while True:
+            try:
+                event = messages.get_nowait()
+            except queue.Empty:
+                return
+            receive(*event)
+
     try:
-        with ProcessPoolExecutor(max_workers=min(len(roots), 4), mp_context=ctx,
-                                 initializer=initialize_worker, initargs=(messages, stop)) as pool:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=initialize_worker,
+                                 initargs=(messages, stop)) as pool:
             jobs = []
             try:
-                for i, root in enumerate(roots):
-                    jobs.append(pool.submit(scan_volume, root, i, len(roots), stage, ignored))
+                for task in tasks:
+                    cancel.check()
+                    jobs.append(pool.submit(work, *task))
                 pending = set(jobs)
                 while pending:
                     cancel.check(force=True)
-                    completed, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
-                    drain(messages)
+                    completed, pending = wait(pending, timeout=0.15, return_when=FIRST_COMPLETED)
+                    drain()
                     for job in completed:
                         job.result()
             finally:
                 stop.set()
                 for job in jobs:
                     job.cancel()
-        drain(messages)
+        drain()
         return [job.result() for job in jobs]
     finally:
         messages.close()
         messages.join_thread()
+
+
+def scan_roots(roots, stage, ignored, cancel):
+    if len(roots) == 1:
+        return [scan_volume(roots[0], 0, 1, stage, ignored, cancel.path)]
+    tasks = [(root, i, len(roots), stage, ignored) for i, root in enumerate(roots)]
+    return run_workers(scan_volume, tasks, min(len(roots), 4), cancel, emit)
 
 
 def run(output, exclude=None, root=None, cancel_file=None):
@@ -509,24 +631,18 @@ def run(output, exclude=None, root=None, cancel_file=None):
         raise ValueError("扫描位置位于排除目录内。")
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=".scan-") as stage:
         ignored = {native(p).casefold() for p in
-                   (stage, output, exclude, cancel_file, getattr(sys, "_MEIPASS", None)) if p}
+                   (stage, output, exclude, cancel_file) if p}
         shards = scan_roots(roots, stage, ignored, cancel)
         cancel.check(force=True)
-        emit("STAGE", "正在合并各磁盘的扫描结果")
-        result = Path(stage) / "report.sqlite"
+        # Use the largest complete shard in place. Directory IDs already have
+        # disjoint ranges; SQLite allocates fresh entry rowids for other volumes.
+        result = Path(max(shards, key=os.path.getsize))
         db = connect(result)
         try:
             db.set_progress_handler(cancel.interrupt_sql, 25000)
-            db.executescript(SCHEMA)
-            for shard in shards:
-                db.execute("ATTACH DATABASE ? AS source", (shard,))
-                with db:
-                    db.execute("INSERT INTO dirs SELECT * FROM source.dirs")
-                    db.execute("""INSERT INTO entries(parent,name,bytes,logical_bytes,flags,fsid)
-                                  SELECT parent,name,bytes,logical_bytes,flags,fsid FROM source.entries""")
-                    db.execute("INSERT INTO volumes SELECT * FROM source.volumes")
-                db.execute("DETACH DATABASE source")
-                Path(shard).unlink()
+            if len(shards) > 1:
+                emit("STAGE", "正在合并各磁盘的扫描结果")
+            merge_shards(db, (shard for shard in shards if Path(shard) != result))
             emit("STAGE", "正在建立文件树排序索引")
             db.executescript("""
                 CREATE INDEX dirs_parent_bytes ON dirs(parent, bytes DESC, name);
