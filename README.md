@@ -4,13 +4,15 @@ Windows 磁盘空间管理器用一棵可展开的文件树展示每个磁盘、
 
 ## 下载和启动
 
-在 [GitHub Releases](https://github.com/peterwangze/windows_disk_manager/releases) 下载 Windows x64 压缩包，解压后运行 `WindowsDiskManager.exe`。请将 `DiskScanner.exe` 与主程序放在同一目录。适用于安装了 .NET Framework 4.8 的 64 位 Windows 10 / 11，发布包已包含扫描器所需的 Python 运行时。
+从 [最新的 GitHub Release](https://github.com/peterwangze/windows_disk_manager/releases/latest) 下载文件名以 `-win-x64-Setup.exe` 结尾的安装程序，双击安装。之后可从开始菜单搜索「磁盘空间管理器」。安装作用于当前 Windows 用户，升级会保留已有的扫描快照。
 
-要固定安装，可在解压目录打开 PowerShell 并运行下列命令。安装程序会复制文件到当前用户的应用目录，并创建名为「磁盘空间管理器」的开始菜单入口。
+适用于安装了 .NET Framework 4.8 的 64 位 Windows 10 / 11。需要便携运行时，可下载同一 Release 的 ZIP 包，解压后运行 `WindowsDiskManager.exe`，将同目录的 `DiskScanner.exe` 保留在原位。
 
-```powershell
-.\Install.ps1
-```
+## 版本与更新
+
+主窗口显示当前版本。点击「检查更新」可查询 GitHub 上的最新正式版。有新版时，点击「下载并自动安装」即可下载、校验并安装，完成后自动重新打开管理器。使用 1.0.0 的用户请先关闭管理器，手动运行一次新版安装 EXE，之后即可在程序内更新。
+
+检查版本、下载安装程序及跟随 GitHub 下载跳转时，都会读取当前用户的 Windows 系统代理设置，遵循自动配置脚本（PAC）、手动代理和系统绕过规则。可以在 Windows「设置 → 网络和 Internet → 代理」中配置。下载完成后，程序会比对 GitHub Release 提供的文件长度和 SHA-256，再启动安装。
 
 ## 浏览、刷新和删除
 
@@ -29,7 +31,7 @@ Windows 磁盘空间管理器用一棵可展开的文件树展示每个磁盘、
 
 ## 从源码构建
 
-在 64 位 Windows 上安装 64 位 Python 和 .NET Framework 4.8。本项目使用 Windows 上的 Framework C# 编译器和系统 SQLite，扫描器使用 Python 标准库。下列命令会构建桌面程序、打包独立扫描器并生成发行压缩包。
+在 64 位 Windows 上安装 64 位 Python、.NET Framework 4.8 及 Inno Setup 6.5 或更高的 6.x 版本。桌面程序使用 Framework C# 编译器和系统 SQLite，扫描器使用 Python 标准库。完整构建会在 `dist` 生成带版本号的单文件安装 EXE 和便携 ZIP。
 
 ```powershell
 python -m pip install PyInstaller==6.19.0
@@ -37,7 +39,9 @@ python -m pip install PyInstaller==6.19.0
 .\dist\WindowsDiskManager\WindowsDiskManager.exe
 ```
 
-构建脚本支持 `-Python <解释器路径>`、`-Part Viewer` 和 `-Part Scanner`。完整构建的 ZIP 位于 `dist`。
+构建脚本支持 `-Python <解释器路径>`、`-Part Viewer` 和 `-Part Scanner`。用 `-Part Package` 可根据已经构建好的程序重新生成两个发行文件。若编译器安装在自定义目录，请用 `-InnoCompiler <ISCC.exe 的路径>` 指定。
+
+发布新版时，将应用版本号与 Git 标签对齐（如 `1.1.0` 和 `v1.1.0`）。在同一份正式 Release 中上传构建生成的 `WindowsDiskManager-<版本>-win-x64-Setup.exe`，保留文件名，以便应用识别对应的安装包。
 
 ## 隔离验证
 
@@ -50,4 +54,5 @@ $env:WDM_SCANNER_EXE = (Resolve-Path '.\dist\WindowsDiskManager\DiskScanner.exe'
 python -B -m unittest discover -s tests -p test_scan.py -v
 powershell.exe -NoProfile -STA -File .\tests\recycle.ps1
 powershell.exe -NoProfile -STA -File .\tests\ui-smoke.ps1
+powershell.exe -NoProfile -File .\tests\update-service.ps1
 ```

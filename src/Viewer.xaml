@@ -111,10 +111,20 @@
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
-    <DockPanel Grid.Row="0" Margin="0,0,0,13">
-      <TextBlock x:Name="Stamp" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#5D7182" FontSize="12"/>
-      <TextBlock Text="Windows 磁盘空间管理器" FontSize="26" FontWeight="SemiBold" VerticalAlignment="Center"/>
-    </DockPanel>
+    <StackPanel Grid.Row="0" Margin="0,0,0,13">
+      <DockPanel>
+        <Button x:Name="CheckUpdates" AutomationProperties.AutomationId="CheckUpdates" Content="检查更新" DockPanel.Dock="Right"
+                Style="{StaticResource ToolButton}" Margin="12,0,0,0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="Stamp" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#5D7182" FontSize="12"/>
+        <StackPanel Orientation="Horizontal">
+          <TextBlock Text="Windows 磁盘空间管理器" FontSize="26" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          <TextBlock x:Name="AppVersion" AutomationProperties.AutomationId="AppVersion" FontSize="13" Margin="10,3,0,0"
+                     VerticalAlignment="Center" Foreground="#4C6B7A"/>
+        </StackPanel>
+      </DockPanel>
+      <TextBlock x:Name="UpdateNotice" AutomationProperties.AutomationId="UpdateNotice" Visibility="Collapsed"
+                 Margin="1,6,0,0" Foreground="#855616" FontSize="12" TextWrapping="Wrap"/>
+    </StackPanel>
     <WrapPanel x:Name="DriveCards" Grid.Row="1" Margin="0,0,0,10"/>
     <StackPanel Grid.Row="2" Margin="0,0,0,8">
       <WrapPanel>

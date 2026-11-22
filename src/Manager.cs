@@ -26,11 +26,12 @@ namespace UsageTree
         private readonly HashSet<Node> picked = new HashSet<Node>();
         private string lastReport;
         private readonly Dictionary<string,string> counters = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-        internal bool AllowPick { get { return !recycling && scan == null && hasIdentities; } }
+        internal bool AllowPick { get { return !recycling && !updateInProgress && scan == null && hasIdentities; } }
 
         private T Control<T>(string name) where T : FrameworkElement { return (T)window.FindName(name); }
         private void AttachControls()
         {
+            AttachUpdates();
             Control<Button>("Refresh").Click += delegate { BeginRefresh(); };
             Control<Button>("CancelScan").Click += delegate { CancelRefresh(); };
             Control<Button>("ClearSelection").Click += delegate { ClearPicks(); };
@@ -79,7 +80,7 @@ namespace UsageTree
         }
         private void SetControls()
         {
-            bool busy = scan != null || recycling;
+            bool busy = scan != null || recycling || updateInProgress;
             Control<Button>("Refresh").IsEnabled = !busy;
             var cancel = Control<Button>("CancelScan");
             cancel.Visibility = scan == null ? Visibility.Collapsed : Visibility.Visible;
@@ -87,6 +88,7 @@ namespace UsageTree
             Control<Button>("ClearSelection").IsEnabled = picked.Count != 0 && !busy;
             Control<Button>("RecycleSelection").IsEnabled = picked.Count != 0 && AllowPick;
             Control<TextBlock>("SelectionCount").Text = "已选 " + picked.Count.ToString("N0") + " 项";
+            if (updateDialog != null) updateDialog.RefreshActions();
         }
         private void UpdatePicks()
         {
@@ -96,7 +98,7 @@ namespace UsageTree
 
         private void BeginRefresh()
         {
-            if (scan != null || recycling || closing) return;
+            if (scan != null || recycling || updateInProgress || closing) return;
             counters.Clear();
             ScanRun run;
             try { run = new ScanRun(dataDirectory); }
@@ -321,6 +323,14 @@ namespace UsageTree
 
         private void OnClosing(object sender, CancelEventArgs args)
         {
+            if (updateDialog != null && updateDialog.IsBusy)
+            {
+                args.Cancel = true;
+                closing = true;
+                updateDialog.RequestClose();
+                if (scan != null) CancelRefresh();
+                return;
+            }
             if (scan == null && !recycling) return;
             args.Cancel = true;
             closing = true;
