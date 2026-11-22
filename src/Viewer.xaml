@@ -385,7 +385,19 @@
       </StackPanel>
 
       <!-- Drive overview -->
-      <WrapPanel x:Name="DriveCards" Grid.Row="1" Margin="0,18,0,0"/>
+      <ScrollViewer Grid.Row="1" Margin="0,18,0,0" HorizontalScrollBarVisibility="Auto"
+                    VerticalScrollBarVisibility="Disabled" Focusable="False">
+        <ScrollViewer.Style>
+          <Style TargetType="ScrollViewer">
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding Visibility,ElementName=ScanActivity}" Value="Visible">
+                <Setter Property="IsEnabled" Value="False"/>
+              </DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </ScrollViewer.Style>
+        <WrapPanel x:Name="DriveCards" Margin="0,3,0,5"/>
+      </ScrollViewer>
 
       <!-- Usage surface -->
       <Border Grid.Row="2" Style="{DynamicResource SurfaceCard}" Margin="0,18,0,0" ClipToBounds="True">
@@ -415,15 +427,6 @@
                   <TextBlock Text="刷新" VerticalAlignment="Center"/>
                 </StackPanel>
               </Button>
-              <Button x:Name="CancelScan" AutomationProperties.AutomationId="CancelScan" Style="{DynamicResource GhostButton}"
-                      Visibility="Collapsed" Margin="0,0,6,0">
-                <StackPanel Orientation="Horizontal">
-                  <Path Data="{DynamicResource IconClose}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                        StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                        Width="12" Height="12" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
-                  <TextBlock Text="取消扫描" VerticalAlignment="Center"/>
-                </StackPanel>
-              </Button>
               <Border Width="1" Height="18" Background="{DynamicResource DividerBrush}" Margin="4,0,8,0" VerticalAlignment="Center"/>
               <Border Style="{DynamicResource Pill}" Background="{DynamicResource SurfaceSunkenBrush}" BorderBrush="Transparent"
                       Padding="10,4.5" Margin="0,0,8,0" VerticalAlignment="Center">
@@ -451,31 +454,70 @@
           </Grid>
 
           <!-- Status line -->
-          <Grid Grid.Row="1" Margin="18,10,18,0">
+          <Grid Grid.Row="1" Margin="18,10,18,10">
+            <Grid.Style>
+              <Style TargetType="Grid">
+                <Style.Triggers>
+                  <DataTrigger Binding="{Binding Visibility,ElementName=ScanActivity}" Value="Visible">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                  </DataTrigger>
+                </Style.Triggers>
+              </Style>
+            </Grid.Style>
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Orientation="Horizontal">
+            <DockPanel Grid.Column="0">
               <Ellipse x:Name="StatusDot" Width="7" Height="7" Fill="{DynamicResource InkFaintBrush}"
                        VerticalAlignment="Center" Margin="0,0,8,0"/>
               <TextBlock x:Name="ScanStatus" AutomationProperties.AutomationId="ScanStatus" FontSize="12"
                          Foreground="{DynamicResource InkSecondaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
-            </StackPanel>
+            </DockPanel>
             <Border Grid.Column="1" Background="{DynamicResource SurfaceMutedBrush}" CornerRadius="6" Padding="7,2"
                     VerticalAlignment="Center" Margin="12,0,0,0">
               <TextBlock Text="F5 重新扫描" FontSize="10.5" Foreground="{DynamicResource InkFaintBrush}"/>
             </Border>
           </Grid>
 
-          <Grid Grid.Row="2">
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto"/>
-              <RowDefinition Height="10"/>
-            </Grid.RowDefinitions>
-            <ProgressBar x:Name="ScanProgress" AutomationProperties.AutomationId="ScanProgress" Height="3"
-                         Margin="18,9,18,0" IsIndeterminate="True" Visibility="Collapsed"/>
-          </Grid>
+          <Border x:Name="ScanActivity" AutomationProperties.AutomationId="ScanActivity"
+                  Grid.Row="2" Margin="16,10,16,12" Padding="14,10,14,10" CornerRadius="10"
+                  Background="{DynamicResource AccentWashBrush}" BorderBrush="{DynamicResource AccentBorderBrush}"
+                  BorderThickness="1" Visibility="Collapsed">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+              </Grid.RowDefinitions>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <Border Width="34" Height="34" Margin="0,0,11,0" CornerRadius="9" Background="{DynamicResource AccentSoftBrush}"
+                      VerticalAlignment="Center">
+                <Path Data="{DynamicResource IconRefresh}" Width="17" Height="17" Stretch="Uniform" HorizontalAlignment="Center"
+                      VerticalAlignment="Center" Stroke="{DynamicResource AccentTextBrush}" StrokeThickness="2"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="0,0,12,0" VerticalAlignment="Center">
+                <TextBlock x:Name="ScanStage" AutomationProperties.AutomationId="ScanStage" Text="正在准备磁盘扫描…"
+                           Foreground="{DynamicResource InkBrush}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding Text,RelativeSource={RelativeSource Self}}"/>
+                <WrapPanel Margin="0,3,0,0">
+                  <TextBlock x:Name="ScanCounts" AutomationProperties.AutomationId="ScanCounts"
+                             FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"
+                             Typography.NumeralAlignment="Tabular" TextWrapping="Wrap" MaxHeight="38" TextTrimming="CharacterEllipsis"
+                             ToolTip="{Binding Text,RelativeSource={RelativeSource Self}}"/>
+                  <TextBlock x:Name="ScanElapsed" AutomationProperties.AutomationId="ScanElapsed" Margin="12,0,0,0"
+                             FontSize="12" Foreground="{DynamicResource InkSecondaryBrush}" Typography.NumeralAlignment="Tabular"/>
+                </WrapPanel>
+              </StackPanel>
+              <Button Grid.Column="2" x:Name="CancelScan" AutomationProperties.AutomationId="CancelScan"
+                      AutomationProperties.Name="取消扫描" Style="{DynamicResource BaseButton}"
+                      VerticalAlignment="Center" Content="取消扫描"/>
+              <ProgressBar Grid.Row="1" Grid.ColumnSpan="3" x:Name="ScanProgress" AutomationProperties.AutomationId="ScanProgress"
+                           AutomationProperties.Name="扫描进行中" Height="5" Margin="0,9,0,0" Background="{DynamicResource AccentBorderBrush}"
+                           Foreground="{DynamicResource AccentBrush}" IsIndeterminate="True"/>
+            </Grid>
+          </Border>
 
           <!-- Column header -->
           <Border Grid.Row="3" Background="{DynamicResource SurfaceMutedBrush}" BorderBrush="{DynamicResource DividerBrush}"
@@ -512,7 +554,15 @@
                       ItemTemplate="{StaticResource Row}" ScrollViewer.VerticalScrollBarVisibility="Visible"
                       ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.CanContentScroll="True"
                       VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
-                      VirtualizingPanel.ScrollUnit="Pixel"/>
+                      VirtualizingPanel.ScrollUnit="Pixel">
+              <TreeView.Style>
+                <Style TargetType="TreeView">
+                  <Style.Triggers>
+                    <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.56"/></Trigger>
+                  </Style.Triggers>
+                </Style>
+              </TreeView.Style>
+            </TreeView>
             <StackPanel x:Name="Empty" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="24">
               <Grid Width="88" Height="88" HorizontalAlignment="Center">
                 <Ellipse Fill="{DynamicResource AccentWashBrush}"/>

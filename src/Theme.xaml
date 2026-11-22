@@ -500,37 +500,37 @@
           <Grid x:Name="PART_Track" ClipToBounds="True">
             <Border Background="{TemplateBinding Background}" CornerRadius="3"/>
             <Border x:Name="PART_Indicator" HorizontalAlignment="Left" Background="{TemplateBinding Foreground}" CornerRadius="3"/>
-            <Border x:Name="SweepHost" Visibility="Collapsed" ClipToBounds="True">
-              <Border x:Name="Sweep" Width="240" HorizontalAlignment="Left" CornerRadius="3">
-                <Border.Background>
-                  <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                    <GradientStop Color="#00FFFFFF" Offset="0"/>
-                    <GradientStop Color="#CC5EEAD4" Offset="0.5"/>
-                    <GradientStop Color="#00FFFFFF" Offset="1"/>
-                  </LinearGradientBrush>
-                </Border.Background>
-                <Border.RenderTransform>
-                  <TranslateTransform x:Name="SweepSlide" X="-260"/>
-                </Border.RenderTransform>
-              </Border>
-            </Border>
+            <Viewbox x:Name="SweepHost" Visibility="Collapsed" Stretch="Fill" ClipToBounds="True">
+              <Grid Width="1000" Height="6" ClipToBounds="True">
+                <Border x:Name="Sweep" Width="250" CornerRadius="3" HorizontalAlignment="Left"
+                        Background="{TemplateBinding Foreground}">
+                  <Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+                </Border>
+              </Grid>
+            </Viewbox>
           </Grid>
           <ControlTemplate.Triggers>
             <Trigger Property="IsIndeterminate" Value="True">
               <Setter TargetName="PART_Indicator" Property="Visibility" Value="Collapsed"/>
               <Setter TargetName="SweepHost" Property="Visibility" Value="Visible"/>
-              <Trigger.EnterActions>
+            </Trigger>
+            <MultiTrigger>
+              <MultiTrigger.Conditions>
+                <Condition Property="IsIndeterminate" Value="True"/>
+                <Condition Property="IsVisible" Value="True"/>
+              </MultiTrigger.Conditions>
+              <MultiTrigger.EnterActions>
                 <BeginStoryboard x:Name="SweepStoryboard">
-                  <Storyboard RepeatBehavior="Forever">
-                    <DoubleAnimation Storyboard.TargetName="SweepSlide" Storyboard.TargetProperty="X"
-                                     From="-260" To="1600" Duration="0:0:2.2"/>
+                  <Storyboard>
+                    <DoubleAnimation Storyboard.TargetName="Sweep" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)"
+                                     From="0" To="750" Duration="0:0:1.35" AutoReverse="True" RepeatBehavior="Forever"/>
                   </Storyboard>
                 </BeginStoryboard>
-              </Trigger.EnterActions>
-              <Trigger.ExitActions>
-                <StopStoryboard BeginStoryboardName="SweepStoryboard"/>
-              </Trigger.ExitActions>
-            </Trigger>
+              </MultiTrigger.EnterActions>
+              <MultiTrigger.ExitActions>
+                <RemoveStoryboard BeginStoryboardName="SweepStoryboard"/>
+              </MultiTrigger.ExitActions>
+            </MultiTrigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
       </Setter.Value>

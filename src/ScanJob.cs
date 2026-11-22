@@ -6,6 +6,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
 namespace UsageTree
@@ -94,22 +95,17 @@ namespace UsageTree
 
     internal sealed class ScanRun : IDisposable
     {
-        internal readonly string Output;
-        private readonly string cancelPath, dataDirectory, stageDirectory;
-        private readonly Process process = new Process();
-        private readonly ScanJob job = new ScanJob();
+        internal string Output { get; private set; }
+        private readonly string dataDirectory;
         private readonly object gate = new object();
-        private string lastError = "";
-        private Timer watchdog;
-        private bool started;
-        internal bool Cancelled { get; private set; }
+        private string stageDirectory;
+        private int startRequested;
+        private volatile bool cancelled, disposed, finished;
+        internal bool Cancelled { get { return cancelled; } }
 
         internal ScanRun(string directory)
         {
             dataDirectory = directory;
-            stageDirectory = ScanStaging.Create(directory);
-            Output = Path.Combine(stageDirectory, "snapshot.sqlite");
-            cancelPath = Path.Combine(stageDirectory, "cancel");
         }
 
         // All arguments are filesystem paths. Windows doubles trailing backslashes before a closing quote.
@@ -121,66 +117,120 @@ namespace UsageTree
 
         internal void Start(Action<string> progress, Action<int,string> complete)
         {
+            if (disposed) throw new ObjectDisposedException("ScanRun");
+            if (Interlocked.Exchange(ref startRequested, 1) != 0)
+                throw new InvalidOperationException("扫描已经启动。");
+            // A single background worker owns the process, its pipes, job handle and
+            // staging I/O. No start, wait, cancellation-file write or cleanup blocks WPF.
+            var worker = new Thread(delegate() {
+                int code = 2;
+                string detail = "";
+                try
+                {
+                    if (!cancelled && !disposed)
+                    {
+                        stageDirectory = ScanStaging.Create(dataDirectory);
+                        Output = Path.Combine(stageDirectory, "snapshot.sqlite");
+                        if (!cancelled && !disposed) code = RunScanner(progress, out detail);
+                    }
+                }
+                catch (Exception ex) { code = cancelled ? 2 : 1; detail = ex.GetBaseException().Message; }
+                finally { finished = true; ScheduleCleanup(); }
+                if (!disposed) complete(code, detail);
+            });
+            worker.IsBackground = true;
+            worker.Name = "Disk scan process";
+            worker.Start();
+        }
+
+        private int RunScanner(Action<string> progress, out string detail)
+        {
             string helper = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DiskScanner.exe");
             if (!File.Exists(helper)) throw new FileNotFoundException("请将 DiskScanner.exe 和管理器放在同一目录。");
+            string cancelPath = Path.Combine(stageDirectory, "cancel");
             string arguments = "--output " + QuotePath(Output) + " --exclude " + QuotePath(dataDirectory) + " --cancel-file " + QuotePath(cancelPath);
             string root = Environment.GetEnvironmentVariable("WDM_SCAN_ROOT");
             if (!String.IsNullOrWhiteSpace(root)) arguments += " --root " + QuotePath(Path.GetFullPath(root));
-            process.StartInfo = new ProcessStartInfo(helper, arguments) {
+            var info = new ProcessStartInfo(helper, arguments) {
                 CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
                 StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
                 WorkingDirectory = AppDomain.CurrentDomain.BaseDirectory
             };
-            process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) {
-                if (e.Data == null) return;
-                if (e.Data.StartsWith("ERROR\t", StringComparison.Ordinal)) { lock (gate) lastError = e.Data.Substring(6); }
-                else progress(e.Data);
-            };
-            process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) {
-                if (!String.IsNullOrWhiteSpace(e.Data)) lock (gate) lastError = e.Data;
-            };
-            if (!process.Start()) throw new IOException("扫描器未能启动。");
-            started = true;
-            job.Attach(process);
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            ThreadPool.QueueUserWorkItem(delegate {
-                int code = 1;
-                string detail;
-                try { process.WaitForExit(); code = process.ExitCode; }
-                catch (Exception ex) { lock (gate) lastError = ex.Message; }
-                lock (gate) detail = lastError;
-                complete(code, detail);
-            });
+            using (var process = new Process { StartInfo = info })
+            using (var job = new ScanJob())
+            {
+                string lastError = "";
+                var stdout = new TaskCompletionSource<bool>();
+                var stderr = new TaskCompletionSource<bool>();
+                process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) {
+                    if (e.Data == null) { stdout.TrySetResult(true); return; }
+                    if (e.Data.StartsWith("ERROR\t", StringComparison.Ordinal))
+                        Interlocked.Exchange(ref lastError, e.Data.Substring(6));
+                    else if (!disposed && !cancelled) progress(e.Data);
+                };
+                process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) {
+                    if (e.Data == null) { stderr.TrySetResult(true); return; }
+                    if (!String.IsNullOrWhiteSpace(e.Data)) Interlocked.Exchange(ref lastError, e.Data);
+                };
+                if (!process.Start()) throw new IOException("扫描器未能启动。");
+                try
+                {
+                    job.Attach(process);
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+                    Stopwatch sinceCancel = null;
+                    while (!process.WaitForExit(100))
+                    {
+                        if (!cancelled && !disposed) continue;
+                        if (sinceCancel == null)
+                        {
+                            sinceCancel = Stopwatch.StartNew();
+                            try { File.WriteAllText(cancelPath, ""); }
+                            catch (IOException) { Stop(process, job); }
+                            catch (UnauthorizedAccessException) { Stop(process, job); }
+                        }
+                        else if (sinceCancel.Elapsed.TotalSeconds >= 30) Stop(process, job);
+                    }
+                    // A leftover descendant can retain a pipe handle after the helper
+                    // exits. Close our job first and bound the final asynchronous drain.
+                    job.Dispose();
+                    Task.WaitAll(new Task[] { stdout.Task, stderr.Task }, 2000);
+                    detail = Volatile.Read(ref lastError);
+                    return process.ExitCode;
+                }
+                catch { Stop(process, job); throw; }
+            }
         }
 
         internal void Cancel()
         {
-            if (Cancelled) return;
-            Cancelled = true;
-            try { File.WriteAllText(cancelPath, ""); }
-            catch (IOException) { StopImmediately(); return; }
-            catch (UnauthorizedAccessException) { StopImmediately(); return; }
-            watchdog = new Timer(delegate { StopImmediately(); }, null, 30000, Timeout.Infinite);
+            cancelled = true;
         }
 
-        private void StopImmediately()
+        private static void Stop(Process process, ScanJob job)
         {
-            lock (gate)
-            {
-                job.Dispose();
-                try { if (started && !process.HasExited) process.Kill(); }
-                catch (InvalidOperationException) { }
-                catch (Win32Exception) { }
-            }
+            job.Dispose();
+            try { if (!process.HasExited) process.Kill(); }
+            catch (InvalidOperationException) { }
+            catch (Win32Exception) { }
         }
 
         public void Dispose()
         {
-            if (watchdog != null) watchdog.Dispose();
-            StopImmediately();
-            lock (gate) { started = false; process.Dispose(); }
-            ScanStaging.Clean(stageDirectory);
+            disposed = true;
+            ScheduleCleanup();
+        }
+
+        private void ScheduleCleanup()
+        {
+            string directory;
+            lock (gate)
+            {
+                if (!disposed || !finished || stageDirectory == null) return;
+                directory = stageDirectory;
+                stageDirectory = null;
+            }
+            ThreadPool.QueueUserWorkItem(delegate { ScanStaging.Clean(directory); });
         }
     }
 }

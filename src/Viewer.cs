@@ -132,7 +132,7 @@ namespace UsageTree
             get { return ExplicitPick || Covered; }
             set { if (CanPick && value != Marked) Owner.TogglePick(this); }
         }
-        public bool CanPick { get { return HasPickBox && Owner != null && Owner.AllowPick && Serial.HasValue && FileId != null && !Covered; } }
+        public bool CanPick { get { return HasPickBox && Owner != null && Owner.CanSelectNodes && Serial.HasValue && FileId != null && !Covered; } }
         public string PickLabel { get { return Covered ? "已包含在所选目录中" : "选择 " + Name; } }
         internal void UpdateSelection()
         {
@@ -555,15 +555,10 @@ namespace UsageTree
                 var header = container.Template.FindName("PART_Header", container) as FrameworkElement;
                 if (header != null)
                 {
-                    header.BringIntoView();
-                    tree.UpdateLayout();
-                    var scroll = FindVisual<ScrollViewer>(tree);
-                    var viewport = scroll == null ? null : FindVisual<ScrollContentPresenter>(scroll);
-                    if (viewport != null)
-                    {
-                        double top = header.TranslatePoint(new Point(0, 0), viewport).Y;
-                        scroll.ScrollToVerticalOffset(scroll.VerticalOffset + top);
-                    }
+                    // Let WPF place the header and its children together. Writing a pixel
+                    // offset back during layout can endlessly re-anchor the virtualized tree.
+                    double height = Math.Max(header.ActualHeight, tree.ActualHeight);
+                    header.BringIntoView(new Rect(0, 0, header.ActualWidth, height));
                 }
             }
         }
@@ -589,24 +584,32 @@ namespace UsageTree
 
         private void LoadPage(Node item)
         {
-            string identity = hasIdentities ? "fsid" : "NULL";
+            if (db == null) return;
+            try { AppendPage(item, ReadPage(db, item, hasIdentities)); }
+            catch (Exception ex) { MessageBox.Show(window, "无法读取此目录。\n" + ex.Message, "Windows 磁盘空间管理器"); }
+        }
+
+        private List<Node> ReadPage(Database source, Node item, bool identities)
+        {
+            string identity = identities ? "fsid" : "NULL";
             string sql = "SELECT id,1 AS kind,name,bytes,logical_bytes,flags,files," + identity + " FROM dirs WHERE parent=?1 " +
                 "UNION ALL SELECT id,0 AS kind,name,bytes,logical_bytes,flags,0 AS files," + identity + " FROM entries WHERE parent=?1 " +
                 "ORDER BY bytes DESC,kind DESC,name,id LIMIT ?2 OFFSET ?3";
             var next = new List<Node>();
-            try
+            source.Query(sql, delegate(IntPtr s)
             {
-                db.Query(sql, delegate(IntPtr s)
-                {
-                    var child = new Node { Id = Database.Number(s,0), IsDirectory = Database.Number(s,1) == 1,
-                        Name = Database.Text(s,2), Bytes = Database.MaybeNumber(s,3), LogicalBytes = Database.MaybeNumber(s,4),
-                        Flags = (int)Database.Number(s,5), Files = Database.Number(s,6), ParentNode = item, FileId = Database.Identity(s,7),
-                        Serial = item.Serial, Owner = this };
-                    child.SetExpandable();
-                    next.Add(child);
-                }, item.Id, PageSize + 1, item.Offset);
-            }
-            catch (Exception ex) { MessageBox.Show(window, "无法读取此目录。\n" + ex.Message, "Windows 磁盘空间管理器"); return; }
+                var child = new Node { Id = Database.Number(s,0), IsDirectory = Database.Number(s,1) == 1,
+                    Name = Database.Text(s,2), Bytes = Database.MaybeNumber(s,3), LogicalBytes = Database.MaybeNumber(s,4),
+                    Flags = (int)Database.Number(s,5), Files = Database.Number(s,6), ParentNode = item, FileId = Database.Identity(s,7),
+                    Serial = item.Serial, Owner = this };
+                child.SetExpandable();
+                next.Add(child);
+            }, item.Id, PageSize + 1, item.Offset);
+            return next;
+        }
+
+        private static void AppendPage(Node item, List<Node> next)
+        {
             var oldMarker = item.Children.LastOrDefault(n => n.IsMore || n.IsPlaceholder);
             // Insert before the placeholder to keep a populated directory expandable throughout the change.
             int index = oldMarker == null ? item.Children.Count : item.Children.IndexOf(oldMarker);
@@ -621,6 +624,7 @@ namespace UsageTree
 
         private void ActionClick(object sender, RoutedEventArgs e)
         {
+            if (scan != null) return;
             var button = e.OriginalSource as Button;
             if (button == null) return;
             var item = button.DataContext as Node;

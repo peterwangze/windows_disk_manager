@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -25,13 +27,18 @@ namespace UsageTree
         private ScanRun scan;
         private readonly HashSet<Node> picked = new HashSet<Node>();
         private string lastReport;
-        private readonly Dictionary<string,string> counters = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-        internal bool AllowPick { get { return !recycling && !updateInProgress && scan == null && hasIdentities; } }
+        private readonly Dictionary<string,Tuple<long,long>> counters = new Dictionary<string,Tuple<long,long>>(StringComparer.OrdinalIgnoreCase);
+        private readonly Stopwatch scanTime = new Stopwatch();
+        private readonly DispatcherTimer scanClock = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        private bool committingScan;
+        internal bool CanSelectNodes { get { return !recycling && !updateInProgress && hasIdentities; } }
+        internal bool AllowPick { get { return scan == null && CanSelectNodes; } }
 
         private T Control<T>(string name) where T : FrameworkElement { return (T)window.FindName(name); }
         private void AttachControls()
         {
             AttachUpdates();
+            scanClock.Tick += delegate { ShowElapsed(); };
             Control<Button>("Refresh").Click += delegate { BeginRefresh(); };
             Control<Button>("CancelScan").Click += delegate { CancelRefresh(); };
             Control<Button>("ClearSelection").Click += delegate { ClearPicks(); };
@@ -39,6 +46,7 @@ namespace UsageTree
             Control<Button>("RecycleReport").Click += delegate { PathDialog("回收站处理结果", lastReport, false); };
             window.PreviewKeyDown += delegate(object sender, KeyEventArgs args) {
                 if (args.Key == Key.F5) { BeginRefresh(); args.Handled = true; }
+                else if (args.Key == Key.Escape && scan != null) { CancelRefresh(); args.Handled = true; }
             };
             window.Closing += OnClosing;
             window.Loaded += delegate
@@ -86,15 +94,19 @@ namespace UsageTree
         }
         private void SetControls()
         {
-            bool busy = scan != null || recycling || updateInProgress;
+            bool scanning = scan != null;
+            bool busy = scanning || recycling || updateInProgress;
             Control<Button>("Refresh").IsEnabled = !busy;
+            tree.IsEnabled = !scanning;
+            Control<WrapPanel>("DriveCards").IsEnabled = !scanning;
+            Control<Button>("CheckUpdates").IsEnabled = !scanning;
+            Control<Button>("RecycleReport").IsEnabled = !scanning;
+            Control<FrameworkElement>("ScanActivity").Visibility = scanning ? Visibility.Visible : Visibility.Collapsed;
             var cancel = Control<Button>("CancelScan");
-            cancel.Visibility = scan == null ? Visibility.Collapsed : Visibility.Visible;
-            cancel.IsEnabled = scan != null && !scan.Cancelled;
+            cancel.IsEnabled = scanning && !scan.Cancelled && !committingScan;
             Control<Button>("ClearSelection").IsEnabled = picked.Count != 0 && !busy;
             Control<Button>("RecycleSelection").IsEnabled = picked.Count != 0 && AllowPick;
             Control<TextBlock>("SelectionCount").Text = "已选 " + picked.Count.ToString("N0") + " 项";
-            Control<ProgressBar>("ScanProgress").Visibility = scan == null ? Visibility.Collapsed : Visibility.Visible;
             Control<System.Windows.Shapes.Ellipse>("StatusDot").Fill = Design.Brush(scan != null ? "AccentBrush" : stale ? "WarningBrush" : "InkFaintBrush");
             if (updateDialog != null) updateDialog.RefreshActions();
         }
@@ -108,13 +120,18 @@ namespace UsageTree
         {
             if (scan != null || recycling || updateInProgress || closing) return;
             counters.Clear();
-            ScanRun run;
-            try { run = new ScanRun(dataDirectory); }
-            catch (Exception ex) { SetStatus("无法准备扫描目录，点击刷新重试。  " + ex.GetBaseException().Message); return; }
+            var run = new ScanRun(dataDirectory);
             scan = run;
-            SetStatus(db == null ? "正在准备首次扫描…" : "正在重新扫描，可继续浏览当前快照。");
-            if (db == null) SetEmpty("正在建立空间快照", "首次扫描会统计整块磁盘，通常需要一些时间；完成后会自动显示明细。");
-            UpdatePicks();
+            scanTime.Restart();
+            ShowElapsed();
+            scanClock.Start();
+            if (db == null) SetEmpty("正在建立磁盘快照", "扫描完成后，这里会显示各个磁盘的文件树。");
+            Control<TextBlock>("ScanStage").Text = "正在启动扫描器…";
+            var counts = Control<TextBlock>("ScanCounts");
+            counts.Text = "正在等待读取目录和文件…";
+            counts.ToolTip = null;
+            SetControls();
+            Control<Button>("CancelScan").Focus();
             try
             {
                 run.Start(
@@ -123,27 +140,37 @@ namespace UsageTree
             }
             catch (Exception ex) { EndRefresh(run, 1, ex.GetBaseException().Message); }
         }
+        private void ShowElapsed()
+        {
+            var elapsed = scanTime.Elapsed;
+            Control<TextBlock>("ScanElapsed").Text = "已用 " + elapsed.ToString(elapsed.TotalHours >= 1 ? @"h\:mm\:ss" : @"mm\:ss");
+        }
         private void ShowProgress(ScanRun run, string line)
         {
-            if (scan != run || run.Cancelled || disposed) return;
+            if (scan != run || run.Cancelled || committingScan || disposed) return;
             string[] words = line.Split('\t');
             if (words[0] == "SCAN" && words.Length >= 4)
             {
                 long dirs, files;
-                if (!Int64.TryParse(words[2], out dirs) || !Int64.TryParse(words[3], out files)) return;
-                counters[words[1]] = words[1] + "  " + dirs.ToString("N0") + " 个目录 / " + files.ToString("N0") + " 个文件";
-                SetStatus("扫描中  " + String.Join("     ·     ", counters.Values.ToArray()));
+                if (!Int64.TryParse(words[2], out dirs) || !Int64.TryParse(words[3], out files) || dirs < 0 || files < 0) return;
+                counters[words[1]] = Tuple.Create(dirs, files);
+                Control<TextBlock>("ScanStage").Text = "正在扫描 " + words[1];
+                var counts = Control<TextBlock>("ScanCounts");
+                counts.Text = String.Format("已扫描 {0:N0} 个目录  ·  {1:N0} 个文件",
+                    counters.Values.Sum(n => n.Item1), counters.Values.Sum(n => n.Item2));
+                counts.ToolTip = String.Join(Environment.NewLine, counters.Select(n =>
+                    String.Format("{0}   {1:N0} 个目录 / {2:N0} 个文件", n.Key, n.Value.Item1, n.Value.Item2)));
             }
-            else if (words[0] == "STAGE" && words.Length >= 2) SetStatus(words[1]);
+            else if (words[0] == "STAGE" && words.Length >= 2) Control<TextBlock>("ScanStage").Text = words[1];
         }
         private void CancelRefresh()
         {
-            if (scan == null) return;
+            if (scan == null || committingScan || scan.Cancelled) return;
             scan.Cancel();
-            SetStatus("正在取消扫描…");
+            Control<TextBlock>("ScanStage").Text = "正在取消扫描…";
             SetControls();
         }
-        private void EndRefresh(ScanRun run, int code, string reason)
+        private async void EndRefresh(ScanRun run, int code, string reason)
         {
             if (scan != run || disposed) return;
             try
@@ -152,7 +179,10 @@ namespace UsageTree
                 else if (code != 0) SetStatus("扫描失败，点击刷新重试。" + (String.IsNullOrWhiteSpace(reason) ? "" : "  " + reason));
                 else
                 {
-                    Publish(run.Output);
+                    committingScan = true;
+                    Control<TextBlock>("ScanStage").Text = "正在载入新的扫描结果…";
+                    SetControls();
+                    await PublishAsync(run.Output);
                     stale = false;
                     try { File.Delete(StaleMarker); }
                     catch (IOException) { }
@@ -164,64 +194,83 @@ namespace UsageTree
             finally
             {
                 scan = null;
+                committingScan = false;
+                scanClock.Stop();
+                scanTime.Stop();
                 run.Dispose();
-                if (db == null) SetEmpty("扫描未完成", "点击「刷新」重新扫描磁盘；扫描期间仍可浏览已有快照。");
+                if (db == null) SetEmpty("扫描未完成", "点击「刷新」重新扫描磁盘。");
                 if (db == null) Control<TextBlock>("Stamp").Text = "尚未完成扫描";
-                UpdatePicks();
+                SetControls();
                 if (closing) window.Close();
             }
         }
 
-        private void Publish(string staged)
+        private async Task PublishAsync(string staged)
         {
-            bool freshIds;
-            List<Node> incoming;
-            using (var candidate = new Database(staged))
+            var incoming = await Task.Run(delegate
             {
-                incoming = ReadRoots(candidate, out freshIds);
-                if (!freshIds) throw new InvalidDataException("扫描结果缺少文件标识。");
-                candidate.Query("SELECT id,parent,name,bytes,logical_bytes,flags,fsid FROM entries LIMIT 0", delegate {});
-                candidate.Query("SELECT id,parent,name,bytes,logical_bytes,flags,fsid,files FROM dirs LIMIT 0", delegate {});
-            }
+                using (var candidate = new Database(staged))
+                {
+                    bool freshIds;
+                    var items = ReadRoots(candidate, out freshIds);
+                    if (!freshIds) throw new InvalidDataException("扫描结果缺少文件标识。");
+                    candidate.Query("SELECT id,parent,name,bytes,logical_bytes,flags,fsid FROM entries LIMIT 0", delegate {});
+                    candidate.Query("SELECT id,parent,name,bytes,logical_bytes,flags,fsid,files FROM dirs LIMIT 0", delegate {});
+                    var root = items[0];
+                    AppendPage(root, ReadPage(candidate, root, freshIds));
+                    return items;
+                }
+            });
             string previous = activePath;
             bool replaced = false;
             string backup = null;
-            if (db != null) { db.Dispose(); db = null; }
+            var oldDatabase = db;
+            db = null;
+            bool rebinding = false;
+            Exception failure;
             try
             {
-                if (File.Exists(Snapshot))
+                db = await Task.Run(delegate
                 {
-                    backup = staged + ".previous";
-                    File.Replace(staged, Snapshot, backup, true);
-                }
-                else File.Move(staged, Snapshot);
-                replaced = true;
-                db = new Database(Snapshot);
+                    if (oldDatabase != null) oldDatabase.Dispose();
+                    if (File.Exists(Snapshot))
+                    {
+                        backup = staged + ".previous";
+                        File.Replace(staged, Snapshot, backup, true);
+                    }
+                    else File.Move(staged, Snapshot);
+                    replaced = true;
+                    return new Database(Snapshot);
+                });
                 activePath = Snapshot;
-                hasIdentities = freshIds;
+                hasIdentities = true;
+                rebinding = true;
                 Display(incoming);
+                // The worker cleans its staged backup after the new tree is on screen.
+                return;
             }
-            catch
+            catch (Exception ex) { failure = ex; }
+
+            if (db != null) { db.Dispose(); db = null; }
+            db = await Task.Run(delegate
             {
-                if (db != null) { db.Dispose(); db = null; }
-                if (replaced && backup != null && File.Exists(backup))
-                {
-                    File.Replace(backup, Snapshot, null, true);
-                    backup = null;
-                }
-                if (previous != null && File.Exists(previous)) OpenExisting(previous);
-                throw;
-            }
-            if (backup != null)
+                if (replaced && backup != null) File.Replace(backup, Snapshot, null, true);
+                return previous == null ? null : new Database(previous);
+            });
+            activePath = previous;
+            if (rebinding && db != null)
             {
-                try { File.Delete(backup); }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
+                bool ids;
+                var previousRoots = ReadRoots(db, out ids);
+                hasIdentities = ids;
+                Display(previousRoots);
             }
+            throw new IOException("无法切换磁盘快照。", failure);
         }
 
         internal void TogglePick(Node item)
         {
+            if (!AllowPick) return;
             if (item.ExplicitPick) { item.ExplicitPick = false; picked.Remove(item); }
             else
             {

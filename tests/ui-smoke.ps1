@@ -73,11 +73,23 @@ try {
     $app = Start-TestApp
     $win = Wait-For 'manager window' {
         $app.Refresh()
-        if ($app.MainWindowHandle -ne 0) { $ae::FromHandle($app.MainWindowHandle) }
+        if ($app.MainWindowHandle -ne [IntPtr]::Zero) {
+            $candidate = $ae::FromHandle($app.MainWindowHandle)
+            if (By-Id $candidate 'UsageTree') { return $candidate }
+        }
     }
-    $null = Wait-For 'first-run scan' { Row $first }
+    $null = Wait-For 'first-run scan' { (Row $first) -and (By-Id $win 'Refresh').Current.IsEnabled }
     [IO.File]::WriteAllText((Join-Path $fixture $second), 'created after the first scan')
+    $snapshot = Join-Path $cache 'disk-usage.sqlite'
+    $previousWrite = [IO.File]::GetLastWriteTimeUtc($snapshot)
+    $priorRuns = @([IO.Directory]::GetDirectories($cache, '.wdm-run-*'))
+    # WPF queues InvokePattern's action on the dispatcher. Its return alone does not
+    # prove the button handled input after publishing the very first snapshot.
     Invoke-Button (By-Id $win 'Refresh')
+    $null = Wait-For 'the refresh button to dispatch a second scan after first-run publication' {
+        [IO.File]::GetLastWriteTimeUtc($snapshot) -ne $previousWrite -or
+            @([IO.Directory]::GetDirectories($cache, '.wdm-run-*') | Where-Object { $_ -notin $priorRuns }).Count -gt 0
+    } 12
     $null = Wait-For 'new file after refresh' { Row $second }
     foreach ($name in $first, $second) {
         $box = By-Id (Row $name) 'SelectItem'

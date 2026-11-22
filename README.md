@@ -20,7 +20,7 @@ Windows 磁盘空间管理器用一棵可展开的文件树展示每个磁盘、
 
 ## 浏览、刷新和删除
 
-- 首次启动会扫描本机磁盘。以后启动时会直接显示上次完成的快照。点击「刷新」或按 **F5** 可重新扫描，扫描过程中可以浏览旧快照。
+- 首次启动会扫描本机磁盘，以后启动时直接显示上次完成的快照。点击「刷新」或按 **F5** 后，进度面板会显示当前阶段、已扫描目录数、文件数和耗时。扫描期间文件树和操作按钮暂时置灰。点击「取消扫描」或按 **Esc** 可返回上一次快照。扫描成功后，文件树会自动显示新结果。
 - 展开目录可查看文件与子目录的占用，鼠标悬停在大小上可查看精确字节数。每行的「打开」或「定位」按钮可在资源管理器中打开目录或选中文件。
 - 勾选文件或目录后，点击「移入回收站」，在确认窗口核对完整路径。选择目录会包含其中的内容，重复勾选的子项只处理一次。「查看处理结果」会列出每一项的结果。成功移入回收站的内容可从 Windows 回收站还原，清空回收站后相应空间才会释放。
 - 快照生成后发生变化的项目会在删除前重新核对身份。磁盘根目录、管理器自身使用的文件和无法确认身份的项目受保护。
@@ -58,5 +58,6 @@ $env:WDM_SCANNER_EXE = (Resolve-Path '.\dist\WindowsDiskManager\DiskScanner.exe'
 python -B -m unittest discover -s tests -p test_scan.py -v
 powershell.exe -NoProfile -STA -File .\tests\recycle.ps1
 powershell.exe -NoProfile -STA -File .\tests\ui-smoke.ps1
+powershell.exe -NoProfile -STA -File .\tests\scan-feedback.ps1
 powershell.exe -NoProfile -File .\tests\update-service.ps1
 ```
