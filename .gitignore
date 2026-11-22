@@ -1,0 +1,16 @@
+/build/
+/dist/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.db
+*.db-*
+.scan-*/
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+.vs/
+*.user
+*.exe
+*.zip
