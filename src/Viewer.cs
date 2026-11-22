@@ -153,10 +153,75 @@ namespace UsageTree
         public string Tip { get { return IsMore ? "显示按占用空间排序的下一批项目" : FullPath; } }
         internal int Depth { get { return ParentNode == null ? 0 : ParentNode.Depth + 1; } }
         public Thickness Indent { get { return new Thickness(Math.Min(Depth, 12) * 15, 0, 0, 0); } }
-        public string Icon { get { return IsMore ? "\uE712" : IsRoot ? "\uEDA2" : IsDirectory ? "\uE838" : "\uE7C3"; } }
-        public Brush IconBrush { get { return IsRoot ? Brushes.Teal : IsDirectory ? Brushes.DarkGoldenrod : Brushes.SlateGray; } }
-        public string NameBrush { get { return IsMore ? "#0C6A70" : "#223849"; } }
-        public FontWeight Weight { get { return IsRoot ? FontWeights.Bold : IsDirectory ? FontWeights.SemiBold : FontWeights.Normal; } }
+
+        private static readonly string[] GenericIcon = { "IconFile", "FileBrush" };
+        private static readonly Dictionary<string, string[]> IconMap = BuildIconMap();
+        private string[] typeIcon;
+        private bool isHovered;
+
+        private static Dictionary<string, string[]> BuildIconMap()
+        {
+            var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+            Action<string, string, string[]> add = delegate(string icon, string brush, string[] extensions)
+            {
+                foreach (var extension in extensions) map[extension] = new[] { icon, brush };
+            };
+            add("IconImage", "ImageBrush", new[] { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".ico", ".heic", ".heif", ".avif", ".raw", ".psd", ".svg" });
+            add("IconVideo", "VideoBrush", new[] { ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpeg", ".mpg", ".ts", ".3gp" });
+            add("IconAudio", "AudioBrush", new[] { ".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma", ".opus", ".aiff", ".mid", ".midi" });
+            add("IconArchive", "ArchiveBrush", new[] { ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".cab", ".lz", ".lzma" });
+            add("IconPdf", "PdfBrush", new[] { ".pdf" });
+            add("IconDocument", "DocumentBrush", new[] { ".doc", ".docx", ".rtf", ".odt", ".txt", ".md", ".markdown", ".log", ".tex", ".epub", ".wps", ".pages" });
+            add("IconSheet", "SheetBrush", new[] { ".xls", ".xlsx", ".xlsm", ".csv", ".tsv", ".ods", ".numbers" });
+            add("IconSlides", "SlidesBrush", new[] { ".ppt", ".pptx", ".pps", ".ppsx", ".odp", ".key" });
+            add("IconCode", "CodeBrush", new[] { ".cs", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".json", ".xml", ".html", ".htm", ".css", ".scss", ".sass", ".less", ".py", ".pyw", ".java", ".c", ".h", ".cpp", ".hpp", ".cc", ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".kts", ".sql", ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".bash", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".config", ".gradle", ".lua", ".pl", ".r", ".vue", ".svelte", ".dart" });
+            add("IconExe", "ExeBrush", new[] { ".exe", ".msi", ".dll", ".sys", ".scr", ".com", ".appx", ".msix", ".appxbundle", ".msixbundle", ".ocx", ".drv" });
+            add("IconFont", "FontBrush", new[] { ".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot", ".fon" });
+            add("IconDisc", "DiscBrush", new[] { ".iso", ".img", ".vhd", ".vhdx", ".vmdk", ".vdi", ".bin", ".nrg", ".mdf" });
+            add("IconLink", "LinkBrush", new[] { ".lnk", ".url", ".website", ".pif" });
+            add("IconDocument", "DocumentBrush", new[] { ".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".pst", ".ost" });
+            return map;
+        }
+
+        private string[] TypeIcon
+        {
+            get
+            {
+                if (typeIcon == null)
+                {
+                    string extension = Path.GetExtension(Name);
+                    if (String.IsNullOrEmpty(extension) || !IconMap.TryGetValue(extension, out typeIcon)) typeIcon = GenericIcon;
+                }
+                return typeIcon;
+            }
+        }
+
+        public Geometry IconGeometry
+        {
+            get { return Design.Geometry(IsMore ? "IconMore" : IsRoot ? "IconDrive" : IsDirectory ? "IconFolder" : TypeIcon[0]); }
+        }
+        public Brush IconBrush
+        {
+            get { return Design.Brush(IsMore ? "AccentBrush" : IsRoot ? "DriveBrush" : IsDirectory ? "FolderBrush" : TypeIcon[1]); }
+        }
+        public Brush NameBrush
+        {
+            get { return Design.Brush(IsMore ? "AccentTextBrush" : IsDirectory ? "InkBrush" : "InkSecondaryBrush"); }
+        }
+        public FontWeight Weight
+        {
+            get { return IsRoot || IsMore ? FontWeights.SemiBold : FontWeights.Normal; }
+        }
+        public bool IsHovered
+        {
+            get { return isHovered; }
+            set
+            {
+                if (value == isHovered) return;
+                isHovered = value;
+                if (PropertyChanged != null) PropertyChanged(this, new PropertyChangedEventArgs("IsHovered"));
+            }
+        }
         public string FlagLabel
         {
             get
@@ -170,6 +235,32 @@ namespace UsageTree
                 return "";
             }
         }
+        public Visibility FlagVisibility
+        {
+            get { return FlagLabel.Length == 0 ? Visibility.Collapsed : Visibility.Visible; }
+        }
+        private string FlagTone
+        {
+            get
+            {
+                string label = FlagLabel;
+                if (label == "已移入回收站") return "Danger";
+                if (label == "链接" || label == "重解析点") return "Accent";
+                return "Warning";
+            }
+        }
+        public Brush FlagBackground
+        {
+            get { return Design.Brush(FlagVisibility == Visibility.Visible ? FlagTone + "SoftBrush" : "TransparentBrush"); }
+        }
+        public Brush FlagBorder
+        {
+            get { return Design.Brush(FlagVisibility == Visibility.Visible ? FlagTone + "BorderBrush" : "TransparentBrush"); }
+        }
+        public Brush FlagForeground
+        {
+            get { return Design.Brush(FlagVisibility == Visibility.Visible ? FlagTone + "TextBrush" : "InkMutedBrush"); }
+        }
         public string SizeText { get { return IsMore || IsPlaceholder ? "" : UnmeasuredDirectory ? "未统计" : FormatSize(Bytes); } }
         public string LengthText { get { return IsMore || IsPlaceholder ? "" : UnmeasuredDirectory ? "未统计" : FormatSize(LogicalBytes); } }
         public string BytesTip { get { return !UnmeasuredDirectory && Bytes.HasValue ? Bytes.Value.ToString("N0") + " 字节已分配" : "无法读取占用空间"; } }
@@ -179,7 +270,7 @@ namespace UsageTree
         public GridLength Filled { get { return new GridLength(Fraction, GridUnitType.Star); } }
         public GridLength Unfilled { get { return new GridLength(1d - Fraction, GridUnitType.Star); } }
         public string PercentText { get { return Fraction > 0 && Fraction < 0.001 ? "<0.1%" : Fraction.ToString("0.#%", CultureInfo.InvariantCulture); } }
-        public string BarBrush { get { return IsDirectory ? "#20818A" : "#537FAE"; } }
+        public Brush BarBrush { get { return Design.Brush(IsDirectory ? "DirectoryBarBrush" : "FileBarBrush"); } }
         public static string FormatSize(long? value)
         {
             if (!value.HasValue) return "未知";
@@ -205,6 +296,30 @@ namespace UsageTree
             if (IsDirectory && (Flags & 2) == 0)
                 Children.Add(new Node { IsPlaceholder = true, Name = "" });
         }
+    }
+
+    internal sealed class DriveCardView
+    {
+        public string Title { get; set; }
+        public string UsageText { get; set; }
+        public string FreeText { get; set; }
+        public string PercentText { get; set; }
+        public string Tip { get; set; }
+        public Geometry ArcGeometry { get; set; }
+        public Brush ArcBrush { get; set; }
+        public Brush PercentBrush { get; set; }
+        public Brush IconBackground { get; set; }
+        public Brush IconBrush { get; set; }
+    }
+
+    internal sealed class SummaryCardView
+    {
+        public string CountText { get; set; }
+        public string UsedText { get; set; }
+        public string TotalText { get; set; }
+        public GridLength Filled { get; set; }
+        public GridLength Unfilled { get; set; }
+        public Brush BarBrush { get; set; }
     }
 
     internal static class Explorer
@@ -239,6 +354,7 @@ namespace UsageTree
         private readonly TreeView tree;
         private readonly TextBlock selection;
         private readonly List<Node> roots = new List<Node>();
+        private Node hovered;
 
         internal Viewer(Window window, string dataDirectory)
         {
@@ -246,9 +362,12 @@ namespace UsageTree
             this.dataDirectory = dataDirectory;
             tree = (TreeView)window.FindName("UsageTree");
             selection = (TextBlock)window.FindName("Selection");
-            selection.Text = "单击箭头展开目录，查看文件和子目录的空间占比。";
+            selection.Text = "选择一项，查看完整路径、空间和文件数。";
+            selection.ToolTip = "选择一项，查看完整路径、空间和文件数。";
             tree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(Expanded));
             tree.AddHandler(ButtonBase.ClickEvent, new RoutedEventHandler(ActionClick));
+            tree.MouseMove += delegate(object sender, MouseEventArgs args) { SetHovered(HoverNode(args)); };
+            tree.MouseLeave += delegate { SetHovered(null); };
             tree.SelectedItemChanged += delegate(object sender, RoutedPropertyChangedEventArgs<object> args)
             {
                 Node item = args.NewValue as Node;
@@ -267,6 +386,31 @@ namespace UsageTree
                 if (item != null && item.IsMore) { LoadPage(item.ParentNode); e.Handled = true; }
             };
             AttachControls();
+        }
+
+        private Node HoverNode(MouseEventArgs args)
+        {
+            DependencyObject element = tree.InputHitTest(args.GetPosition(tree)) as DependencyObject;
+            while (element != null)
+            {
+                var container = element as TreeViewItem;
+                if (container != null)
+                {
+                    if (container.IsSelected) return null;
+                    return container.DataContext as Node;
+                }
+                if (!(element is Visual) && !(element is System.Windows.Media.Media3D.Visual3D)) return null;
+                element = VisualTreeHelper.GetParent(element);
+            }
+            return null;
+        }
+
+        private void SetHovered(Node node)
+        {
+            if (ReferenceEquals(node, hovered)) return;
+            if (hovered != null) hovered.IsHovered = false;
+            hovered = node;
+            if (hovered != null) hovered.IsHovered = true;
         }
 
         private List<Node> ReadRoots(Database source, out bool identities)
@@ -299,10 +443,11 @@ namespace UsageTree
             ((FrameworkElement)window.FindName("Empty")).Visibility = Visibility.Collapsed;
             tree.ItemsSource = roots;
             foreach (var item in roots) AddCard(item);
+            AddSummaryCard(roots);
             string finish = roots.Select(item => item.Finished).OrderBy(x => x, StringComparer.Ordinal).Last();
             DateTimeOffset time;
             if (DateTimeOffset.TryParse(finish, out time)) finish = time.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
-            ((TextBlock)window.FindName("Stamp")).Text = "扫描完成  " + finish;
+            ((TextBlock)window.FindName("Stamp")).Text = "最近扫描  " + finish;
             ShowRoot(roots[0]);
             SetControls();
         }
@@ -310,26 +455,76 @@ namespace UsageTree
         private void AddCard(Node item)
         {
             var panel = (WrapPanel)window.FindName("DriveCards");
-            var content = new StackPanel();
-            var heading = new DockPanel { LastChildFill = true };
-            var pct = new TextBlock { Text = item.Total > 0 ? ((double)(item.Total-item.Free)/item.Total).ToString("0.#%") : "", Foreground = Brushes.Teal, VerticalAlignment = VerticalAlignment.Center, FontSize = 13 };
-            DockPanel.SetDock(pct, Dock.Right);
-            heading.Children.Add(pct);
-            string driveName = item.Name.Length == 3 && item.Name[1] == ':' ? item.Name.Substring(0,1) + " 盘" : item.Name;
-            heading.Children.Add(new TextBlock { Text = driveName, FontSize = 17, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
-            content.Children.Add(heading);
-            var space = new ProgressBar { Value = item.Total > 0 ? (double)(item.Total-item.Free)/item.Total*100 : 0,
-                Height = 5, Margin = new Thickness(0,6,0,5), Foreground = Brushes.Teal, Background = new SolidColorBrush(Color.FromRgb(221,232,234)), BorderThickness = new Thickness(0) };
-            content.Children.Add(space);
-            content.Children.Add(new TextBlock { Text = "系统已用 " + Node.FormatSize(item.Total - item.Free) + " / " + Node.FormatSize(item.Total), FontSize = 12, Foreground = Brushes.DarkSlateGray });
-            var button = new Button { Content = content, Width = 255, Padding = new Thickness(13,6,13,7),
-                HorizontalContentAlignment = HorizontalAlignment.Stretch, Background = Brushes.White,
-                BorderBrush = new SolidColorBrush(Color.FromRgb(208,222,225)), BorderThickness = new Thickness(1),
-                Cursor = Cursors.Hand, Margin = new Thickness(0,0,9,2), ToolTip = "展开并跳转到 " + item.Name };
+            long used = Math.Max(0, item.Total - item.Free);
+            double fraction = item.Total > 0 ? Math.Min(1d, Math.Max(0d, (double)used / item.Total)) : 0d;
+            string tone = fraction >= 0.92 ? "Danger" : fraction >= 0.8 ? "Warning" : "Accent";
+            string driveName;
+            if (item.Name.Length == 3 && item.Name[1] == ':') driveName = item.Name.Substring(0, 1) + " 盘";
+            else
+            {
+                driveName = Path.GetFileName(item.Name.TrimEnd('\\'));
+                if (String.IsNullOrEmpty(driveName)) driveName = item.Name;
+            }
+            var card = new DriveCardView
+            {
+                Title = driveName,
+                UsageText = item.Total > 0
+                    ? "已用 " + Node.FormatSize(used) + " · 共 " + Node.FormatSize(item.Total)
+                    : "容量未知 · 磁盘可能未联机",
+                FreeText = item.Total > 0 ? "可用 " + Node.FormatSize(item.Free) : "系统未报告此磁盘的容量",
+                PercentText = item.Total > 0 ? fraction.ToString("0%", CultureInfo.InvariantCulture) : "—",
+                Tip = item.Name + (item.Total > 0
+                    ? "   已用 " + Node.FormatSize(used) + "，可用 " + Node.FormatSize(item.Free) + "，总计 " + Node.FormatSize(item.Total)
+                    : "   系统未报告容量"),
+                ArcGeometry = UiKit.RingArc(30, 27.5, fraction),
+                ArcBrush = Design.Brush(tone + "GradientBrush"),
+                PercentBrush = Design.Brush(tone + "TextBrush"),
+                IconBackground = Design.Brush(tone == "Accent" ? "AccentSoftBrush" : tone + "SoftBrush"),
+                IconBrush = Design.Brush(tone + "Brush")
+            };
+            var button = new Button
+            {
+                Content = card,
+                ContentTemplate = (DataTemplate)window.FindResource("DriveCardTemplate"),
+                Style = (Style)window.FindResource("DriveCardButton"),
+                ToolTip = "展开并跳转到 " + item.Name
+            };
             AutomationProperties.SetName(button, "跳到 " + item.Name);
-            AutomationProperties.SetAutomationId(button, "Drive" + item.Name.Substring(0,1));
+            AutomationProperties.SetAutomationId(button, "Drive" + item.Name.Substring(0, 1));
             button.Click += delegate { ShowRoot(item); };
             panel.Children.Add(button);
+        }
+
+        private void AddSummaryCard(List<Node> items)
+        {
+            var panel = (WrapPanel)window.FindName("DriveCards");
+            long total = items.Sum(n => Math.Max(0, n.Total));
+            long free = items.Sum(n => Math.Max(0, n.Free));
+            long files = items.Sum(n => n.Files);
+            double fraction = total > 0 ? Math.Min(1d, Math.Max(0d, (double)(total - free) / total)) : 0d;
+            string tone = fraction >= 0.92 ? "Danger" : fraction >= 0.8 ? "Warning" : "Accent";
+            var summary = new SummaryCardView
+            {
+                CountText = items.Count.ToString("N0") + " 块磁盘 · " + files.ToString("N0") + " 个文件",
+                UsedText = "已用 " + Node.FormatSize(total - free),
+                TotalText = "总容量 " + Node.FormatSize(total) + " · 可用 " + Node.FormatSize(free),
+                Filled = new GridLength(Math.Max(0.0001d, fraction), GridUnitType.Star),
+                Unfilled = new GridLength(Math.Max(0.0001d, 1d - fraction), GridUnitType.Star),
+                BarBrush = Design.Brush(tone + "GradientBrush")
+            };
+            var border = new Border
+            {
+                Style = (Style)window.FindResource("SummaryCard"),
+                Child = new ContentControl
+                {
+                    Content = summary,
+                    ContentTemplate = (DataTemplate)window.FindResource("SummaryCardTemplate")
+                },
+                ToolTip = "所有已扫描磁盘的容量与文件数汇总"
+            };
+            AutomationProperties.SetAutomationId(border, "DriveSummary");
+            AutomationProperties.SetName(border, "空间概览");
+            panel.Children.Add(border);
         }
 
         private void ShowRoot(Node item)
@@ -450,10 +645,12 @@ namespace UsageTree
                 data = Path.GetFullPath(data);
                 Directory.CreateDirectory(data);
                 using (var instance = InstanceLock.Acquire(data))
+                using (var theme = Assembly.GetExecutingAssembly().GetManifestResourceStream("Theme.xaml"))
                 using (var xaml = Assembly.GetExecutingAssembly().GetManifestResourceStream("Viewer.xaml"))
                 {
                     if (instance == null) return;
                     var app = new Application();
+                    app.Resources = (ResourceDictionary)XamlReader.Load(theme);
                     var window = (Window)XamlReader.Load(xaml);
                     window.Width = Math.Min(window.Width, SystemParameters.WorkArea.Width * 0.94);
                     window.Height = Math.Min(window.Height, SystemParameters.WorkArea.Height * 0.92);

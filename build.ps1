@@ -17,7 +17,7 @@ if ($Part -in 'All','Viewer') {
     if (!(Test-Path -LiteralPath $compiler)) { throw 'The Microsoft .NET Framework x64 compiler is required.' }
     $arguments = @('/nologo', '/noconfig', '/target:winexe', '/platform:x64', '/optimize+', '/codepage:65001',
         '/main:UsageTree.Program', "/out:$product\WindowsDiskManager.exe", "/win32manifest:$src\app.manifest",
-        "/win32icon:$src\app.ico", "/resource:$src\Viewer.xaml,Viewer.xaml")
+        "/win32icon:$src\app.ico", "/resource:$src\Theme.xaml,Theme.xaml", "/resource:$src\Viewer.xaml,Viewer.xaml")
     foreach ($name in 'System', 'System.Core', 'System.Xaml', 'System.Xml', 'System.Web.Extensions') {
         $arguments += "/reference:$framework\$name.dll"
     }

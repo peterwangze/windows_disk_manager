@@ -2,6 +2,10 @@
 
 Windows 磁盘空间管理器用一棵可展开的文件树展示每个磁盘、目录和文件的占用。每一层按占用空间从大到小排列，横条表示该项目占父目录的比例。
 
+![磁盘空间管理器主窗口](docs/screenshot.png)
+
+界面采用现代浅色设计：磁盘用量卡片和环形仪表概览整盘空间，文件按类型显示彩色图标，目录树保持紧凑，扫描、刷新和回收站操作都在同一个工作区内完成。
+
 ## 下载和启动
 
 从 [最新的 GitHub Release](https://github.com/peterwangze/windows_disk_manager/releases/latest) 下载文件名以 `-win-x64-Setup.exe` 结尾的安装程序，双击安装。之后可从开始菜单搜索「磁盘空间管理器」。安装作用于当前 Windows 用户，升级会保留已有的扫描快照。
@@ -41,7 +45,7 @@ python -m pip install PyInstaller==6.19.0
 
 构建脚本支持 `-Python <解释器路径>`、`-Part Viewer` 和 `-Part Scanner`。用 `-Part Package` 可根据已经构建好的程序重新生成两个发行文件。若编译器安装在自定义目录，请用 `-InnoCompiler <ISCC.exe 的路径>` 指定。
 
-发布新版时，将应用版本号与 Git 标签对齐（如 `1.1.0` 和 `v1.1.0`）。在同一份正式 Release 中上传构建生成的 `WindowsDiskManager-<版本>-win-x64-Setup.exe`，保留文件名，以便应用识别对应的安装包。
+发布新版时，将应用版本号与 Git 标签对齐（如 `1.2.0` 和 `v1.2.0`）。在同一份正式 Release 中上传构建生成的 `WindowsDiskManager-<版本>-win-x64-Setup.exe`，保留文件名，以便应用识别对应的安装包。
 
 ## 隔离验证
 

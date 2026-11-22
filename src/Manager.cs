@@ -78,6 +78,12 @@ namespace UsageTree
             string suffix = stale && db != null ? "  当前快照可能包含已移走的项目。" : "";
             Control<TextBlock>("ScanStatus").Text = text + suffix;
         }
+        private void SetEmpty(string title, string note)
+        {
+            Control<TextBlock>("EmptyTitle").Text = title;
+            Control<TextBlock>("EmptyNote").Text = note;
+            Control<FrameworkElement>("Empty").Visibility = Visibility.Visible;
+        }
         private void SetControls()
         {
             bool busy = scan != null || recycling || updateInProgress;
@@ -88,6 +94,8 @@ namespace UsageTree
             Control<Button>("ClearSelection").IsEnabled = picked.Count != 0 && !busy;
             Control<Button>("RecycleSelection").IsEnabled = picked.Count != 0 && AllowPick;
             Control<TextBlock>("SelectionCount").Text = "已选 " + picked.Count.ToString("N0") + " 项";
+            Control<ProgressBar>("ScanProgress").Visibility = scan == null ? Visibility.Collapsed : Visibility.Visible;
+            Control<System.Windows.Shapes.Ellipse>("StatusDot").Fill = Design.Brush(scan != null ? "AccentBrush" : stale ? "WarningBrush" : "InkFaintBrush");
             if (updateDialog != null) updateDialog.RefreshActions();
         }
         private void UpdatePicks()
@@ -105,6 +113,7 @@ namespace UsageTree
             catch (Exception ex) { SetStatus("无法准备扫描目录，点击刷新重试。  " + ex.GetBaseException().Message); return; }
             scan = run;
             SetStatus(db == null ? "正在准备首次扫描…" : "正在重新扫描，可继续浏览当前快照。");
+            if (db == null) SetEmpty("正在建立空间快照", "首次扫描会统计整块磁盘，通常需要一些时间；完成后会自动显示明细。");
             UpdatePicks();
             try
             {
@@ -156,6 +165,8 @@ namespace UsageTree
             {
                 scan = null;
                 run.Dispose();
+                if (db == null) SetEmpty("扫描未完成", "点击「刷新」重新扫描磁盘；扫描期间仍可浏览已有快照。");
+                if (db == null) Control<TextBlock>("Stamp").Text = "尚未完成扫描";
                 UpdatePicks();
                 if (closing) window.Close();
             }
@@ -242,36 +253,122 @@ namespace UsageTree
 
         private bool PathDialog(string title, string text, bool confirm)
         {
-            var dialog = new Window { Title = title, Owner = window, WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Width = Math.Min(760, SystemParameters.WorkArea.Width * .9), Height = Math.Min(440, SystemParameters.WorkArea.Height * .85),
-                MinWidth = 450, MinHeight = 240, FontFamily = window.FontFamily, Background = Brushes.White, ShowInTaskbar = false };
-            var box = new DockPanel { Margin = new Thickness(18) };
-            var headline = new TextBlock { Text = confirm ? "将所选 " + picked.Count.ToString("N0") + " 项移入回收站？" : "逐项处理结果", FontWeight = FontWeights.SemiBold, FontSize = 18, Margin = new Thickness(0,0,0,6) };
-            DockPanel.SetDock(headline, Dock.Top); box.Children.Add(headline);
+            int lines = 1;
+            foreach (char c in text) if (c == '\n') lines++;
+            var dialog = new Window
+            {
+                Title = title,
+                Owner = window,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Width = Math.Min(780, SystemParameters.WorkArea.Width * .9),
+                Height = Math.Min(560, Math.Max(340, 280 + Math.Min(12, lines) * 18)),
+                MinWidth = 520,
+                MinHeight = 320,
+                FontFamily = window.FontFamily,
+                FontSize = 13,
+                Background = Design.Brush("CanvasBrush"),
+                Foreground = Design.Brush("InkBrush"),
+                ShowInTaskbar = false,
+                UseLayoutRounding = true
+            };
+            AutomationProperties.SetAutomationId(dialog, confirm ? "RecycleDialog" : "ReportDialog");
+
+            var card = new Border { Style = Design.Style("SurfaceCard"), Margin = new Thickness(18), Padding = new Thickness(24, 22, 24, 18) };
+            var box = new DockPanel { LastChildFill = true };
+            card.Child = box;
+            dialog.Content = card;
+
+            var header = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 4) };
+            header.Children.Add(UiKit.IconTile(confirm ? "IconWarning" : "IconCheck", 44,
+                Design.Brush(confirm ? "WarningSoftBrush" : "SuccessSoftBrush"),
+                Design.Brush(confirm ? "WarningBrush" : "SuccessBrush")));
+            var heading = new StackPanel { Margin = new Thickness(13, 1, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            heading.Children.Add(new TextBlock
+            {
+                Text = confirm ? "确认移入回收站" : "回收站处理结果",
+                FontFamily = Design.Font("DisplayFont"),
+                FontSize = 20,
+                FontWeight = FontWeights.SemiBold
+            });
+            heading.Children.Add(new TextBlock
+            {
+                Text = confirm
+                    ? "所选 " + picked.Count.ToString("N0") + " 项将移入 Windows 回收站，可随时还原。"
+                    : "以下是每一项的处理结果，成功与失败的条目都会列出。",
+                Style = Design.Style("Subtitle"),
+                Margin = new Thickness(0, 4, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            });
+            header.Children.Add(heading);
+            DockPanel.SetDock(header, Dock.Top);
+            box.Children.Add(header);
+
             if (confirm)
             {
-                var note = new TextBlock { Text = "目录将连同内部全部内容一起移入回收站。", Margin = new Thickness(0,0,0,10) };
-                DockPanel.SetDock(note, Dock.Top); box.Children.Add(note);
+                var note = new Border
+                {
+                    Background = Design.Brush("WarningSoftBrush"),
+                    BorderBrush = Design.Brush("WarningBorderBrush"),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(9),
+                    Padding = new Thickness(12, 8, 12, 8),
+                    Margin = new Thickness(0, 14, 0, 0),
+                    Child = new TextBlock
+                    {
+                        Text = "目录会连同内部全部内容一起移入回收站。",
+                        FontSize = 12,
+                        Foreground = Design.Brush("WarningTextBrush"),
+                        TextWrapping = TextWrapping.Wrap
+                    }
+                };
+                DockPanel.SetDock(note, Dock.Top);
+                box.Children.Add(note);
             }
-            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0,12,0,0) };
-            DockPanel.SetDock(buttons, Dock.Bottom); box.Children.Add(buttons);
-            var cancel = new Button { Content = confirm ? "取消" : "关闭", IsCancel = true, IsDefault = !confirm, Padding = new Thickness(16,5,16,5) };
-            AutomationProperties.SetAutomationId(cancel, confirm ? "CancelRecycle" : "CloseReport");
+
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
+            DockPanel.SetDock(buttons, Dock.Bottom);
+            box.Children.Add(buttons);
+            var cancel = UiKit.Button(confirm ? "取消" : "关闭", null, confirm ? "BaseButton" : "BaseButton", confirm ? "CancelRecycle" : "CloseReport");
+            cancel.IsCancel = true;
+            cancel.IsDefault = !confirm;
             cancel.Click += delegate { dialog.DialogResult = false; };
             buttons.Children.Add(cancel);
             if (confirm)
             {
-                var yes = new Button { Content = "确认移入回收站", Padding = new Thickness(16,5,16,5), Margin = new Thickness(8,0,0,0) };
-                AutomationProperties.SetAutomationId(yes, "ConfirmRecycle");
+                var yes = UiKit.Button("确认移入回收站", "IconTrash", "DangerButton", "ConfirmRecycle");
+                yes.IsDefault = true;
+                yes.Margin = new Thickness(4, 0, 0, 0);
                 yes.Click += delegate { dialog.DialogResult = true; };
                 buttons.Children.Add(yes);
             }
-            var paths = new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Padding = new Thickness(8), Background = new SolidColorBrush(Color.FromRgb(247,249,250)) };
+
+            var frame = new Border
+            {
+                Background = Design.Brush("SurfaceBrush"),
+                BorderBrush = Design.Brush("BorderBrush"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Margin = new Thickness(0, 16, 0, 0),
+                Padding = new Thickness(12, 8, 8, 8)
+            };
+            var paths = new TextBox
+            {
+                Text = text,
+                IsReadOnly = true,
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.NoWrap,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                FontFamily = Design.Font("MonoFont"),
+                FontSize = 12,
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(0)
+            };
             AutomationProperties.SetAutomationId(paths, confirm ? "ConfirmPaths" : "ResultPaths");
-            box.Children.Add(paths);
-            dialog.Content = box;
+            frame.Child = paths;
+            box.Children.Add(frame);
+
             dialog.Loaded += delegate { cancel.Focus(); };
             return dialog.ShowDialog() == true;
         }

@@ -66,12 +66,21 @@ namespace UsageTree
                 if (!File.Exists(PendingUpdate) || new FileInfo(PendingUpdate).Length > 256) return;
                 Version target;
                 if (!Version.TryParse(File.ReadAllText(PendingUpdate).Trim(), out target)) return;
+                var panel = Control<Border>("UpdateNoticePanel");
                 var notice = Control<TextBlock>("UpdateNotice");
                 bool reached = CompareVersions(InstalledVersion, target) >= 0;
                 notice.Text = reached ? "已完成更新，当前版本 v" + currentVersion + "。" :
                     "上次安装的目标版本为 v" + target + "，当前仍为 v" + currentVersion + "。可在「检查更新」中重试或查看安装日志。";
-                notice.Foreground = reached ? Brushes.Teal : Brushes.DarkGoldenrod;
-                notice.Visibility = Visibility.Visible;
+                panel.Background = Design.Brush(reached ? "SuccessSoftBrush" : "WarningSoftBrush");
+                panel.BorderBrush = Design.Brush(reached ? "SuccessBorderBrush" : "WarningBorderBrush");
+                notice.Foreground = Design.Brush(reached ? "SuccessTextBrush" : "WarningTextBrush");
+                var icon = (System.Windows.Shapes.Path)window.FindName("UpdateNoticeIcon");
+                if (icon != null)
+                {
+                    icon.Data = Design.Geometry(reached ? "IconCheck" : "IconInfo");
+                    icon.Stroke = Design.Brush(reached ? "SuccessBrush" : "WarningBrush");
+                }
+                panel.Visibility = Visibility.Visible;
                 if (reached) File.Delete(PendingUpdate);
             }
             catch (IOException) { }
@@ -148,6 +157,7 @@ namespace UsageTree
         private readonly Viewer manager;
         private readonly TextBlock latest, state, activityNote;
         private readonly ProgressBar bar;
+        private readonly Border statusCard;
         private readonly Button recheck, install, cancel, close, showLog;
         private UpdateRelease release;
         private CancellationTokenSource work;
@@ -163,44 +173,114 @@ namespace UsageTree
             ShowInTaskbar = false;
             FontFamily = owner.FontFamily;
             FontSize = 13;
-            Background = new SolidColorBrush(Color.FromRgb(245,248,249));
-            Foreground = new SolidColorBrush(Color.FromRgb(32,51,69));
-            Width = Math.Min(558, SystemParameters.WorkArea.Width * .95);
-            Height = Math.Min(360, SystemParameters.WorkArea.Height * .9);
-            MinWidth = 420;
-            MinHeight = 315;
+            Background = Design.Brush("CanvasBrush");
+            Foreground = Design.Brush("InkBrush");
+            Width = Math.Min(640, SystemParameters.WorkArea.Width * .95);
+            Height = Math.Min(470, SystemParameters.WorkArea.Height * .9);
+            MinWidth = 520;
+            MinHeight = 440;
+            UseLayoutRounding = true;
             AutomationProperties.SetAutomationId(this, "UpdateWindow");
-            var layout = new DockPanel { Margin = new Thickness(22) };
-            Content = layout;
-            var headline = new TextBlock { Text = Title, FontSize = 24, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0,0,0,12) };
-            DockPanel.SetDock(headline, Dock.Top); layout.Children.Add(headline);
-            var versions = new Grid { Margin = new Thickness(0,0,0,12) };
+
+            var card = new Border { Style = Design.Style("SurfaceCard"), Margin = new Thickness(18), Padding = new Thickness(24, 22, 24, 18) };
+            var layout = new DockPanel { LastChildFill = true };
+            card.Child = layout;
+            Content = card;
+
+            var header = new StackPanel { Orientation = Orientation.Horizontal };
+            header.Children.Add(UiKit.IconTile("IconUpdate", 46, Design.Brush("AccentSoftBrush"), Design.Brush("AccentBrush")));
+            var heading = new StackPanel { Margin = new Thickness(13, 1, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            heading.Children.Add(new TextBlock { Text = "软件更新", FontFamily = Design.Font("DisplayFont"), FontSize = 21, FontWeight = FontWeights.SemiBold });
+            heading.Children.Add(new TextBlock
+            {
+                Text = "从 GitHub 获取最新稳定版本，下载后自动校验并启动安装。",
+                Style = Design.Style("Subtitle"),
+                Margin = new Thickness(0, 4, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            });
+            header.Children.Add(heading);
+            DockPanel.SetDock(header, Dock.Top);
+            layout.Children.Add(header);
+
+            var footer = new Grid { Margin = new Thickness(0, 16, 0, 0) };
+            footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var leftActions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center };
+            showLog = UiKit.Button("查看安装日志", "IconReport", "GhostButton", "OpenUpdateLog");
+            leftActions.Children.Add(showLog);
+            var rightActions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+            recheck = UiKit.Button("重新检查", "IconRefresh", "SoftButton", "RecheckUpdate");
+            install = UiKit.Button("下载并自动安装", "IconUpdate", "AccentButton", "InstallUpdate");
+            cancel = UiKit.Button("取消", null, "GhostButton", "CancelUpdate");
+            close = UiKit.Button("关闭", null, "BaseButton", "CloseUpdate");
+            close.Margin = new Thickness(0);
+            rightActions.Children.Add(recheck);
+            rightActions.Children.Add(install);
+            rightActions.Children.Add(cancel);
+            rightActions.Children.Add(close);
+            Grid.SetColumn(rightActions, 1);
+            footer.Children.Add(leftActions);
+            footer.Children.Add(rightActions);
+            DockPanel.SetDock(footer, Dock.Bottom);
+            layout.Children.Add(footer);
+
+            var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Margin = new Thickness(0, 16, 0, 0) };
+            layout.Children.Add(scroll);
+            var body = new StackPanel();
+            scroll.Content = body;
+
+            var versions = new Grid { Margin = new Thickness(0, 0, 0, 14) };
             versions.ColumnDefinitions.Add(new ColumnDefinition());
             versions.ColumnDefinitions.Add(new ColumnDefinition());
             var current = VersionCell(versions, 0, "当前版本", "CurrentVersion");
             current.Text = "v" + manager.CurrentVersion;
             latest = VersionCell(versions, 1, "最新稳定版本", "LatestVersion");
             latest.Text = "待检查";
-            DockPanel.SetDock(versions, Dock.Top); layout.Children.Add(versions);
-            var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0,10,0,0) };
-            DockPanel.SetDock(buttons, Dock.Bottom); layout.Children.Add(buttons);
-            showLog = ActionButton(buttons, "查看安装日志", "OpenUpdateLog");
-            recheck = ActionButton(buttons, "重新检查", "RecheckUpdate");
-            install = ActionButton(buttons, "下载并自动安装", "InstallUpdate");
-            cancel = ActionButton(buttons, "取消", "CancelUpdate");
-            close = ActionButton(buttons, "关闭", "CloseUpdate");
+            body.Children.Add(versions);
+
+            var statusCard = new Border
+            {
+                Background = Design.Brush("SurfaceMutedBrush"),
+                BorderBrush = Design.Brush("BorderBrush"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(15, 13, 15, 13)
+            };
+            this.statusCard = statusCard;
             var messages = new StackPanel();
-            var scroll = new ScrollViewer { Content = messages, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-            layout.Children.Add(scroll);
-            state = new TextBlock { FontSize = 14, TextWrapping = TextWrapping.Wrap };
+            state = new TextBlock { FontSize = 13, TextWrapping = TextWrapping.Wrap, LineHeight = 20, MinHeight = 20, VerticalAlignment = VerticalAlignment.Center };
             AutomationProperties.SetAutomationId(state, "UpdateStatus");
             messages.Children.Add(state);
-            bar = new ProgressBar { Height = 6, Minimum = 0, Maximum = 100, Margin = new Thickness(0,10,4,0), Foreground = Brushes.Teal };
+            bar = new ProgressBar { Height = 6, Minimum = 0, Maximum = 100, Margin = new Thickness(0, 10, 0, 0) };
             AutomationProperties.SetAutomationId(bar, "UpdateProgress");
             messages.Children.Add(bar);
-            activityNote = new TextBlock { Margin = new Thickness(0,8,0,0), TextWrapping = TextWrapping.Wrap, Foreground = Brushes.DarkSlateGray };
+            activityNote = new TextBlock
+            {
+                Margin = new Thickness(0, 9, 0, 0),
+                FontSize = 11.5,
+                Foreground = Design.Brush("InkMutedBrush"),
+                TextWrapping = TextWrapping.Wrap,
+                Visibility = Visibility.Collapsed
+            };
             AutomationProperties.SetAutomationId(activityNote, "UpdateActivityNote");
             messages.Children.Add(activityNote);
+            statusCard.Child = messages;
+            body.Children.Add(statusCard);
+
+            var trust = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(2, 12, 0, 0) };
+            var check = UiKit.LineIcon("IconCheck", 13, Design.Brush("SuccessBrush"), 1.9);
+            check.Margin = new Thickness(0, 0, 7, 0);
+            trust.Children.Add(check);
+            trust.Children.Add(new TextBlock
+            {
+                Text = "安装包来自 GitHub 发布页，并经过 SHA-256 与文件大小校验。",
+                FontSize = 11.5,
+                Foreground = Design.Brush("InkMutedBrush"),
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            body.Children.Add(trust);
+
             recheck.Click += async delegate { await Check(); };
             install.Click += async delegate { await DownloadAndInstall(); };
             cancel.Click += delegate { CancelWork(); };
@@ -216,23 +296,23 @@ namespace UsageTree
         private static TextBlock VersionCell(Grid grid, int column, string label, string id)
         {
             var cells = new StackPanel();
-            cells.Children.Add(new TextBlock { Text = label, Foreground = Brushes.SlateGray, FontSize = 12 });
-            var number = new TextBlock { FontSize = 20, FontWeight = FontWeights.SemiBold };
+            cells.Children.Add(new TextBlock { Text = label, Style = Design.Style("ColumnHeader") });
+            var number = new TextBlock { FontFamily = Design.Font("DisplayFont"), FontSize = 24, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 5, 0, 0) };
             AutomationProperties.SetAutomationId(number, id);
             cells.Children.Add(number);
-            var border = new Border { Child = cells, Background = Brushes.White, Padding = new Thickness(12,8,12,8),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(215,226,230)), BorderThickness = new Thickness(1),
-                Margin = column == 0 ? new Thickness(0,0,4,0) : new Thickness(4,0,0,0) };
-            Grid.SetColumn(border, column); grid.Children.Add(border);
+            var border = new Border
+            {
+                Child = cells,
+                Background = Design.Brush("SurfaceBrush"),
+                BorderBrush = Design.Brush("BorderBrush"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(16, 11, 16, 11),
+                Margin = column == 0 ? new Thickness(0, 0, 5, 0) : new Thickness(5, 0, 0, 0)
+            };
+            Grid.SetColumn(border, column);
+            grid.Children.Add(border);
             return number;
-        }
-        private static Button ActionButton(Panel parent, string label, string id)
-        {
-            var button = new Button { Content = label, Padding = new Thickness(9,5,9,5), Margin = new Thickness(5,2,0,2),
-                Background = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(169,190,196)), MinHeight = 28 };
-            AutomationProperties.SetAutomationId(button, id);
-            parent.Children.Add(button);
-            return button;
         }
         internal void RefreshActions()
         {
@@ -248,6 +328,7 @@ namespace UsageTree
             bar.Visibility = IsBusy ? Visibility.Visible : Visibility.Collapsed;
             activityNote.Text = eligible && !downloading ? blocked.Length != 0 ? blocked :
                 "安装完成后将重新打开应用。" + (manager.PickCount == 0 ? "" : "当前勾选的 " + manager.PickCount + " 项将在重启后清空。") : "";
+            activityNote.Visibility = activityNote.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         }
         private void CancelWork()
         {
@@ -263,6 +344,13 @@ namespace UsageTree
             CancelWork();
         }
 
+        private void StatusTone(string tone)
+        {
+            statusCard.Background = Design.Brush(tone == "Success" ? "SuccessSoftBrush" : tone == "Accent" ? "AccentSoftBrush" : tone == "Danger" ? "DangerSoftBrush" : "SurfaceMutedBrush");
+            statusCard.BorderBrush = Design.Brush(tone == "Success" ? "SuccessBorderBrush" : tone == "Accent" ? "AccentBorderBrush" : tone == "Danger" ? "DangerBorderBrush" : "BorderBrush");
+            state.Foreground = Design.Brush(tone == "Success" ? "SuccessTextBrush" : tone == "Accent" ? "AccentTextBrush" : tone == "Danger" ? "DangerTextBrush" : "InkBrush");
+        }
+
         private async Task Check()
         {
             if (IsBusy || committed) return;
@@ -271,6 +359,7 @@ namespace UsageTree
             var token = work.Token;
             state.Text = "正在检查 GitHub 上的最新稳定版本…";
             latest.Text = "检查中";
+            StatusTone("Neutral");
             bar.IsIndeterminate = true;
             RefreshActions();
             try
@@ -279,13 +368,16 @@ namespace UsageTree
                 token.ThrowIfCancellationRequested();
                 release = found;
                 latest.Text = "v" + found.VersionText.TrimStart('v','V');
-                if (found.IsNewer) state.Text = "有新版本可用，安装包大小为 " + Node.FormatSize(found.Size) + "。";
+                if (found.IsNewer) { state.Text = "有新版本可用，安装包大小为 " + Node.FormatSize(found.Size) + "。"; StatusTone("Accent"); }
                 else if (Viewer.CompareVersions(manager.InstalledVersion, found.Version) > 0)
+                {
                     state.Text = "当前版本高于已发布的稳定版本。";
-                else state.Text = "当前已是最新稳定版本。";
+                    StatusTone("Success");
+                }
+                else { state.Text = "当前已是最新稳定版本。"; StatusTone("Success"); }
             }
-            catch (OperationCanceledException) { latest.Text = "未完成"; state.Text = token.IsCancellationRequested ? "已取消检查。" : "检查超时，请重试并确认系统代理可以连接 GitHub。"; }
-            catch (Exception ex) { latest.Text = "未取得"; state.Text = ErrorText("检查更新失败", ex); }
+            catch (OperationCanceledException) { latest.Text = "未完成"; StatusTone("Neutral"); state.Text = token.IsCancellationRequested ? "已取消检查。" : "检查超时，请重试并确认系统代理可以连接 GitHub。"; }
+            catch (Exception ex) { latest.Text = "未取得"; StatusTone("Danger"); state.Text = ErrorText("检查更新失败", ex); }
             finally { FinishWork(); }
         }
 
@@ -299,6 +391,7 @@ namespace UsageTree
             work = operation;
             downloading = true;
             state.Text = "正在下载 " + selected.AssetName + "  ·  0%";
+            StatusTone("Neutral");
             bar.IsIndeterminate = false;
             bar.Value = 0;
             RefreshActions();
@@ -314,11 +407,12 @@ namespace UsageTree
                 file = await UpdateService.DownloadAsync(selected, progress, operation.Token);
                 operation.Token.ThrowIfCancellationRequested();
                 state.Text = "正在启动已校验的安装程序…";
+                StatusTone("Success");
                 manager.LaunchVerifiedSetup(selected, file);
                 committed = true;
             }
-            catch (OperationCanceledException) { state.Text = operation.IsCancellationRequested ? "下载已取消，可以重新下载。" : "下载超时，请重试并确认系统代理可以连接 GitHub。"; }
-            catch (Exception ex) { state.Text = ErrorText("更新失败", ex); }
+            catch (OperationCanceledException) { StatusTone("Neutral"); state.Text = operation.IsCancellationRequested ? "下载已取消，可以重新下载。" : "下载超时，请重试并确认系统代理可以连接 GitHub。"; }
+            catch (Exception ex) { StatusTone("Danger"); state.Text = ErrorText("更新失败", ex); }
             finally
             {
                 if (!committed && file != null)

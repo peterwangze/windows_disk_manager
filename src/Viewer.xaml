@@ -1,173 +1,554 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Windows 磁盘空间管理器" Width="1130" Height="800" MinWidth="780" MinHeight="490"
-        WindowStartupLocation="CenterScreen" Background="#F3F6F8"
-        FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13" Foreground="#203345"
-        UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+        Title="Windows 磁盘空间管理器" Width="1210" Height="870" MinWidth="1000" MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource CanvasBrush}" FontFamily="{DynamicResource UiFont}" FontSize="13"
+        Foreground="{DynamicResource InkBrush}" UseLayoutRounding="True"
+        TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="ClearType">
   <Window.Resources>
     <BooleanToVisibilityConverter x:Key="WhenTrue"/>
-    <Style TargetType="Button" x:Key="ToolButton">
-      <Setter Property="Padding" Value="12,4"/><Setter Property="Margin" Value="0,0,7,0"/>
-      <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="#AABFC7"/>
-      <Setter Property="Cursor" Value="Hand"/><Setter Property="MinHeight" Value="28"/>
-    </Style>
-    <Style TargetType="Button" x:Key="Link">
-      <Setter Property="Foreground" Value="#0B666D"/>
-      <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Template"><Setter.Value>
-        <ControlTemplate TargetType="Button">
-          <Border x:Name="Plate" CornerRadius="4" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
-            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-          </Border>
-          <ControlTemplate.Triggers>
-            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Plate" Property="Background" Value="#DEEEEF"/></Trigger>
-            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Plate" Property="Background" Value="#CCE5E6"/></Trigger>
-          </ControlTemplate.Triggers>
-        </ControlTemplate>
-      </Setter.Value></Setter>
-    </Style>
-    <HierarchicalDataTemplate x:Key="Row" ItemsSource="{Binding Children}">
-      <Grid Height="34" Margin="9,0,5,0" Background="Transparent">
+    <GridLength x:Key="ColSize">122</GridLength>
+    <GridLength x:Key="ColShare">180</GridLength>
+    <GridLength x:Key="ColLogical">112</GridLength>
+    <GridLength x:Key="ColAction">92</GridLength>
+
+    <LinearGradientBrush x:Key="CanvasGradient" StartPoint="0,0" EndPoint="0.4,1">
+      <GradientStop Color="#F8FBFC" Offset="0"/>
+      <GradientStop Color="#F1F6F8" Offset="0.55"/>
+      <GradientStop Color="#EDF4F6" Offset="1"/>
+    </LinearGradientBrush>
+
+    <DataTemplate x:Key="DriveCardTemplate">
+      <Grid  Margin="16,13,15,13">
         <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/><ColumnDefinition Width="108"/><ColumnDefinition Width="140"/>
-          <ColumnDefinition Width="98"/><ColumnDefinition Width="64"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <Grid Grid.Column="0">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <StackPanel VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal">
+            <Border Width="28" Height="28" CornerRadius="8" Background="{Binding IconBackground}" VerticalAlignment="Center">
+              <Path Data="{DynamicResource IconDrive}" Fill="{Binding IconBrush}" Width="15" Height="15" Stretch="Uniform"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <TextBlock Text="{Binding Title}" FontSize="14.5" FontWeight="SemiBold" Margin="9,0,0,0"
+                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="150"/>
+          </StackPanel>
+          <TextBlock Text="{Binding UsageText}" FontSize="11.5" Foreground="{DynamicResource InkSecondaryBrush}" Margin="0,11,0,0"
+                     TextTrimming="CharacterEllipsis"/>
+          <TextBlock Text="{Binding FreeText}" FontSize="11.5" Foreground="{DynamicResource InkMutedBrush}" Margin="0,3,0,0"/>
+        </StackPanel>
+        <Grid Grid.Column="1" Width="60" Height="60" Margin="12,0,0,0" VerticalAlignment="Center" ToolTip="{Binding Tip}">
+          <Ellipse Width="55" Height="55" Stroke="{DynamicResource TrackBrush}" StrokeThickness="5"/>
+          <Path Data="{Binding ArcGeometry}" Stroke="{Binding ArcBrush}" StrokeThickness="5"
+                StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="60" Height="60" Stretch="None"/>
+          <TextBlock Text="{Binding PercentText}" FontSize="12" FontWeight="SemiBold" HorizontalAlignment="Center"
+                     VerticalAlignment="Center" Foreground="{Binding PercentBrush}"/>
+        </Grid>
+      </Grid>
+    </DataTemplate>
+
+    <DataTemplate x:Key="SummaryCardTemplate">
+      <Grid Margin="16,13,16,13">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <StackPanel Orientation="Horizontal">
+            <Border Width="28" Height="28" CornerRadius="8" Background="{DynamicResource SurfaceSunkenBrush}" VerticalAlignment="Center">
+              <Path Data="{DynamicResource IconSparkle}" Stroke="{DynamicResource InkSecondaryBrush}" StrokeThickness="1.8"
+                    StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="15" Height="15" Stretch="Uniform"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <TextBlock Text="空间概览" FontSize="13.5" FontWeight="SemiBold" Margin="9,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+          <TextBlock Grid.Column="1" Text="{Binding CountText}" FontSize="10.5" Foreground="{DynamicResource InkMutedBrush}"
+                     HorizontalAlignment="Right" VerticalAlignment="Center" Margin="8,1,0,0"/>
+        </Grid>
+        <StackPanel Grid.Row="1" VerticalAlignment="Center">
+          <TextBlock Text="{Binding UsedText}" FontFamily="{DynamicResource DisplayFont}" FontSize="20" FontWeight="SemiBold"
+                     Typography.NumeralAlignment="Tabular"/>
+          <TextBlock Text="{Binding TotalText}" FontSize="11.5" Foreground="{DynamicResource InkMutedBrush}" Margin="0,3,0,0"/>
+        </StackPanel>
+        <Border Grid.Row="2" Height="5" CornerRadius="2.5" Background="{DynamicResource TrackBrush}">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="{Binding Filled}"/>
+              <ColumnDefinition Width="{Binding Unfilled}"/>
+            </Grid.ColumnDefinitions>
+            <Border Background="{Binding BarBrush}" CornerRadius="2.5"/>
+          </Grid>
+        </Border>
+      </Grid>
+    </DataTemplate>
+
+    <Style x:Key="SummaryCard" TargetType="Border">
+      <Setter Property="Width" Value="278"/>
+      <Setter Property="Height" Value="112"/>
+      <Setter Property="Margin" Value="0,0,12,0"/>
+      <Setter Property="Background" Value="{DynamicResource SurfaceBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="14"/>
+      <Setter Property="Effect" Value="{DynamicResource CardShadowSoft}"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+    </Style>
+
+    <Style x:Key="DriveCardButton" TargetType="Button">
+      <Setter Property="Width" Value="278"/>
+      <Setter Property="Height" Value="112"/>
+      <Setter Property="Margin" Value="0,0,12,0"/>
+      <Setter Property="Background" Value="{DynamicResource SurfaceBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="FocusVisualStyle" Value="{DynamicResource FocusVisual}"/>
+      <Setter Property="Effect" Value="{DynamicResource CardShadowSoft}"/>
+      <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+      <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Plate" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="14" SnapsToDevicePixels="True">
+              <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="BorderBrush" Value="{DynamicResource AccentBorderBrush}"/>
+          <Setter Property="Effect" Value="{DynamicResource CardShadow}"/>
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter Property="Background" Value="{DynamicResource AccentWashBrush}"/>
+        </Trigger>
+        <Trigger Property="IsEnabled" Value="False">
+          <Setter Property="Opacity" Value="0.5"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <HierarchicalDataTemplate x:Key="Row" ItemsSource="{Binding Children}">
+      <Grid Height="40">
+        <Grid.Style>
+          <Style TargetType="Grid">
+            <Setter Property="Background" Value="Transparent"/>
+          </Style>
+        </Grid.Style>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="{StaticResource ColSize}"/>
+          <ColumnDefinition Width="{StaticResource ColShare}"/>
+          <ColumnDefinition Width="{StaticResource ColLogical}"/>
+          <ColumnDefinition Width="{StaticResource ColAction}"/>
+        </Grid.ColumnDefinitions>
+        <Grid Grid.Column="0" Margin="0,0,10,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="28"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
           <CheckBox x:Name="PickBox" Tag="pick" AutomationProperties.AutomationId="SelectItem" AutomationProperties.Name="{Binding PickLabel}"
                     HorizontalAlignment="Center" VerticalAlignment="Center" IsEnabled="{Binding CanPick}"
                     Visibility="{Binding HasPickBox,Converter={StaticResource WhenTrue}}" IsChecked="{Binding Marked,Mode=TwoWay}"
                     ToolTip="{Binding PickLabel}"/>
-        <Grid Grid.Column="1" Margin="{Binding Indent}" ToolTip="{Binding Tip}" ClipToBounds="True">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="22"/><ColumnDefinition Width="24"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <ToggleButton Grid.Column="0" Width="22" Height="26" Focusable="False" Cursor="Hand"
-              AutomationProperties.Name="展开或收起"
-              Visibility="{Binding HasItems,RelativeSource={RelativeSource AncestorType=TreeViewItem},Converter={StaticResource WhenTrue}}"
-              IsChecked="{Binding IsExpanded,RelativeSource={RelativeSource AncestorType=TreeViewItem},Mode=TwoWay}">
-            <ToggleButton.Template>
-              <ControlTemplate TargetType="ToggleButton">
-                <Grid Background="Transparent">
-                  <Path x:Name="Caret" Data="M 1,1 L 5,5 L 1,9" Stroke="#536679" StrokeThickness="1.5"
-                      HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
-                </Grid>
-                <ControlTemplate.Triggers><Trigger Property="IsChecked" Value="True">
-                  <Setter TargetName="Caret" Property="RenderTransform"><Setter.Value><RotateTransform Angle="90"/></Setter.Value></Setter>
-                </Trigger></ControlTemplate.Triggers>
-              </ControlTemplate>
-            </ToggleButton.Template>
-          </ToggleButton>
-          <TextBlock Grid.Column="1" FontFamily="Segoe MDL2 Assets" FontSize="15" VerticalAlignment="Center"
-                     Foreground="{Binding IconBrush}" Text="{Binding Icon}" IsHitTestVisible="False"/>
-          <TextBlock Grid.Column="2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Text="{Binding Name}"
-                     FontWeight="{Binding Weight}" Foreground="{Binding NameBrush}"/>
-          <TextBlock Grid.Column="3" VerticalAlignment="Center" Foreground="#986122" FontSize="11"
-                     Margin="4,0,5,0" Text="{Binding FlagLabel}"/>
+          <Grid Grid.Column="1" Margin="{Binding Indent}" ToolTip="{Binding Tip}" ClipToBounds="True" Background="Transparent">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="22"/>
+              <ColumnDefinition Width="26"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <ToggleButton Grid.Column="0" Width="22" Height="22" Focusable="False" Cursor="Hand"
+                AutomationProperties.Name="展开或收起"
+                Visibility="{Binding HasItems,RelativeSource={RelativeSource AncestorType=TreeViewItem},Converter={StaticResource WhenTrue}}"
+                IsChecked="{Binding IsExpanded,RelativeSource={RelativeSource AncestorType=TreeViewItem},Mode=TwoWay}">
+              <ToggleButton.Template>
+                <ControlTemplate TargetType="ToggleButton">
+                  <Grid Background="Transparent">
+                    <Path x:Name="Caret" Data="{DynamicResource IconChevronRight}" Stroke="{DynamicResource InkMutedBrush}"
+                          StrokeThickness="2.1" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                          Width="13" Height="13" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"
+                          RenderTransformOrigin="0.5,0.5"/>
+                  </Grid>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsChecked" Value="True">
+                      <Setter TargetName="Caret" Property="RenderTransform">
+                        <Setter.Value><RotateTransform Angle="90"/></Setter.Value>
+                      </Setter>
+                      <Setter TargetName="Caret" Property="Stroke" Value="{DynamicResource AccentBrush}"/>
+                    </Trigger>
+                    <Trigger Property="IsMouseOver" Value="True">
+                      <Setter TargetName="Caret" Property="Stroke" Value="{DynamicResource AccentBrush}"/>
+                    </Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </ToggleButton.Template>
+            </ToggleButton>
+            <Path Grid.Column="1" Data="{Binding IconGeometry}" Fill="{Binding IconBrush}" Width="18" Height="18"
+                  Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False"/>
+            <TextBlock Grid.Column="2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Text="{Binding Name}"
+                       Margin="1,0,0,0" FontSize="13" FontWeight="{Binding Weight}" Foreground="{Binding NameBrush}"/>
+            <Border Grid.Column="3" Background="{Binding FlagBackground}" BorderBrush="{Binding FlagBorder}"
+                    BorderThickness="1" CornerRadius="20" Padding="7,1.5" Margin="9,0,0,0" VerticalAlignment="Center"
+                    Visibility="{Binding FlagVisibility}">
+              <TextBlock Text="{Binding FlagLabel}" Style="{DynamicResource Badge}" Foreground="{Binding FlagForeground}"/>
+            </Border>
+          </Grid>
         </Grid>
-        </Grid>
-        <TextBlock Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Text="{Binding SizeText}" FontWeight="SemiBold"
-                   FontFamily="Segoe UI, Microsoft YaHei UI" ToolTip="{Binding BytesTip}"/>
-        <Grid Grid.Column="2" Margin="17,0,0,0" Visibility="{Binding ShowShare,Converter={StaticResource WhenTrue}}">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="53"/></Grid.ColumnDefinitions>
-          <Border Height="7" VerticalAlignment="Center" Background="#E6EEF0" CornerRadius="3">
-            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="{Binding Filled}"/><ColumnDefinition Width="{Binding Unfilled}"/></Grid.ColumnDefinitions>
-              <Border Background="{Binding BarBrush}" CornerRadius="3"/></Grid>
+        <TextBlock Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Text="{Binding SizeText}"
+                   FontFamily="{DynamicResource UiFont}" FontSize="12.5" FontWeight="SemiBold"
+                   Typography.NumeralAlignment="Tabular" ToolTip="{Binding BytesTip}"/>
+        <Grid Grid.Column="2" Margin="22,0,20,0" Visibility="{Binding ShowShare,Converter={StaticResource WhenTrue}}">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="46"/>
+          </Grid.ColumnDefinitions>
+          <Border Height="6" VerticalAlignment="Center" Background="{DynamicResource TrackBrush}" CornerRadius="3">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="{Binding Filled}"/>
+                <ColumnDefinition Width="{Binding Unfilled}"/>
+              </Grid.ColumnDefinitions>
+              <Border Background="{Binding BarBrush}" CornerRadius="3"/>
+            </Grid>
           </Border>
-          <TextBlock Grid.Column="1" Text="{Binding PercentText}" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#486075" FontFamily="Segoe UI"/>
+          <TextBlock Grid.Column="1" Text="{Binding PercentText}" HorizontalAlignment="Right" VerticalAlignment="Center"
+                     Foreground="{DynamicResource InkSecondaryBrush}" Margin="6,0,0,0" FontSize="11.5"/>
         </Grid>
         <TextBlock Grid.Column="3" HorizontalAlignment="Right" VerticalAlignment="Center" Text="{Binding LengthText}"
-                   Foreground="#556A7C" FontFamily="Segoe UI, Microsoft YaHei UI" ToolTip="{Binding LogicalTip}"/>
-        <Button Grid.Column="4" Tag="reveal" Style="{StaticResource Link}" Visibility="{Binding CanReveal,Converter={StaticResource WhenTrue}}"
+                   Foreground="{DynamicResource InkMutedBrush}" FontSize="12" FontFamily="{DynamicResource UiFont}"
+                   Typography.NumeralAlignment="Tabular" ToolTip="{Binding LogicalTip}"/>
+        <Button Grid.Column="4" Tag="reveal" Style="{DynamicResource LinkButton}"
+                Visibility="{Binding CanReveal,Converter={StaticResource WhenTrue}}"
                 AutomationProperties.AutomationId="RevealInExplorer" AutomationProperties.Name="{Binding ActionText}"
-                Content="{Binding ActionText}" ToolTip="{Binding RevealTip}" Padding="7,3" Margin="4,0,0,0" VerticalAlignment="Center"/>
-        <Button Grid.Column="4" Tag="more" Style="{StaticResource Link}" Visibility="{Binding IsMore,Converter={StaticResource WhenTrue}}"
-                AutomationProperties.AutomationId="LoadMore" Content="加载" Padding="7,3" Margin="4,0,0,0" VerticalAlignment="Center"/>
+                ToolTip="{Binding RevealTip}" Margin="0,0,12,0" VerticalAlignment="Center" HorizontalAlignment="Right">
+          <StackPanel Orientation="Horizontal">
+            <Path Data="{DynamicResource IconOpen}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                  StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                  Width="12" Height="12" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,5,0"/>
+            <TextBlock Text="{Binding ActionText}" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
+        <Button Grid.Column="4" Tag="more" Style="{DynamicResource LinkButton}"
+                Visibility="{Binding IsMore,Converter={StaticResource WhenTrue}}"
+                AutomationProperties.AutomationId="LoadMore" ToolTip="显示按占用空间排序的下一批项目"
+                Margin="0,0,12,0" VerticalAlignment="Center" HorizontalAlignment="Right">
+          <StackPanel Orientation="Horizontal">
+            <Path Data="{DynamicResource IconPlus}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                  StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                  Width="12" Height="12" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,5,0"/>
+            <TextBlock Text="显示更多" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
       </Grid>
     </HierarchicalDataTemplate>
+
     <Style TargetType="TreeViewItem">
       <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
       <Setter Property="AutomationProperties.Name" Value="{Binding Name}"/>
       <Setter Property="IsExpanded" Value="{Binding IsOpen,Mode=TwoWay}"/>
-      <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></Setter.Value></Setter>
-      <Setter Property="Template"><Setter.Value>
-        <ControlTemplate TargetType="TreeViewItem">
-          <StackPanel>
-            <Border x:Name="Backdrop" Background="White" BorderBrush="#F0F3F4" BorderThickness="0,0,0,1">
-              <ContentPresenter x:Name="PART_Header" ContentSource="Header" HorizontalAlignment="Stretch"/>
-            </Border>
-            <ItemsPresenter x:Name="ChildrenHost"/>
-          </StackPanel>
-          <ControlTemplate.Triggers>
-            <Trigger Property="IsExpanded" Value="False"><Setter TargetName="ChildrenHost" Property="Visibility" Value="Collapsed"/></Trigger>
-            <Trigger SourceName="Backdrop" Property="IsMouseOver" Value="True"><Setter TargetName="Backdrop" Property="Background" Value="#F2F8F8"/></Trigger>
-            <Trigger Property="IsSelected" Value="True"><Setter TargetName="Backdrop" Property="Background" Value="#DCEFF0"/></Trigger>
-          </ControlTemplate.Triggers>
-        </ControlTemplate>
-      </Setter.Value></Setter>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Margin" Value="0,1,0,1"/>
+      <Setter Property="SnapsToDevicePixels" Value="True"/>
+      <Setter Property="ItemsPanel">
+        <Setter.Value>
+          <ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TreeViewItem">
+            <StackPanel>
+              <Border x:Name="RowHost" Background="Transparent" CornerRadius="8" SnapsToDevicePixels="True">
+                <Grid>
+                  <Border x:Name="SelectedBar" Width="3" Height="18" CornerRadius="1.5" HorizontalAlignment="Left"
+                          VerticalAlignment="Center" Margin="1,0,0,0" Background="Transparent"/>
+                  <ContentPresenter x:Name="PART_Header" ContentSource="Header" HorizontalAlignment="Stretch"/>
+                </Grid>
+              </Border>
+              <ItemsPresenter x:Name="ChildrenHost"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsExpanded" Value="False">
+                <Setter TargetName="ChildrenHost" Property="Visibility" Value="Collapsed"/>
+              </Trigger>
+              <DataTrigger Binding="{Binding IsHovered}" Value="True">
+                <Setter TargetName="RowHost" Property="Background" Value="{DynamicResource SurfaceMutedBrush}"/>
+              </DataTrigger>
+              <DataTrigger Binding="{Binding IsMore}" Value="True">
+                <Setter TargetName="RowHost" Property="Background" Value="{DynamicResource AccentWashBrush}"/>
+              </DataTrigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="RowHost" Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                <Setter TargetName="SelectedBar" Property="Background" Value="{DynamicResource AccentBrush}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
   </Window.Resources>
-  <Grid Margin="24,18,24,14">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
-    </Grid.RowDefinitions>
-    <StackPanel Grid.Row="0" Margin="0,0,0,13">
-      <DockPanel>
-        <Button x:Name="CheckUpdates" AutomationProperties.AutomationId="CheckUpdates" Content="检查更新" DockPanel.Dock="Right"
-                Style="{StaticResource ToolButton}" Margin="12,0,0,0" VerticalAlignment="Center"/>
-        <TextBlock x:Name="Stamp" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="#5D7182" FontSize="12"/>
-        <StackPanel Orientation="Horizontal">
-          <TextBlock Text="Windows 磁盘空间管理器" FontSize="26" FontWeight="SemiBold" VerticalAlignment="Center"/>
-          <TextBlock x:Name="AppVersion" AutomationProperties.AutomationId="AppVersion" FontSize="13" Margin="10,3,0,0"
-                     VerticalAlignment="Center" Foreground="#4C6B7A"/>
-        </StackPanel>
-      </DockPanel>
-      <TextBlock x:Name="UpdateNotice" AutomationProperties.AutomationId="UpdateNotice" Visibility="Collapsed"
-                 Margin="1,6,0,0" Foreground="#855616" FontSize="12" TextWrapping="Wrap"/>
-    </StackPanel>
-    <WrapPanel x:Name="DriveCards" Grid.Row="1" Margin="0,0,0,10"/>
-    <StackPanel Grid.Row="2" Margin="0,0,0,8">
-      <WrapPanel>
-        <Button x:Name="Refresh" AutomationProperties.AutomationId="Refresh" Content="刷新" ToolTip="重新扫描（F5）" Style="{StaticResource ToolButton}"/>
-        <Button x:Name="CancelScan" AutomationProperties.AutomationId="CancelScan" Content="取消扫描" Visibility="Collapsed" Style="{StaticResource ToolButton}"/>
-        <TextBlock x:Name="SelectionCount" AutomationProperties.AutomationId="SelectionCount" Margin="7,0,11,0" VerticalAlignment="Center" Foreground="#354F60" Text="已选 0 项"/>
-        <Button x:Name="ClearSelection" AutomationProperties.AutomationId="ClearSelection" Content="清空选择" Style="{StaticResource ToolButton}" IsEnabled="False"/>
-        <Button x:Name="RecycleSelection" AutomationProperties.AutomationId="RecycleSelection" Content="移入回收站" Style="{StaticResource ToolButton}" IsEnabled="False"/>
-        <Button x:Name="RecycleReport" AutomationProperties.AutomationId="RecycleReport" Content="查看处理结果" Visibility="Collapsed" Style="{StaticResource ToolButton}"/>
-        <TextBlock x:Name="RecycleSummary" Margin="4,0,0,0" VerticalAlignment="Center" Foreground="#46616E"/>
-      </WrapPanel>
-      <TextBlock x:Name="ScanStatus" AutomationProperties.AutomationId="ScanStatus" Margin="1,7,0,0" Foreground="#476777" FontSize="12" TextWrapping="Wrap"/>
-    </StackPanel>
-    <Border Grid.Row="3" Background="White" BorderBrush="#D6E1E5" BorderThickness="1" CornerRadius="7">
-      <Grid ClipToBounds="True">
-        <Grid.RowDefinitions><RowDefinition Height="37"/><RowDefinition Height="*"/><RowDefinition Height="32"/></Grid.RowDefinitions>
-        <Border Grid.Row="0" BorderBrush="#DCE4E8" BorderThickness="0,0,0,1" Background="#E9F0F2" CornerRadius="7,7,0,0">
-          <Grid Margin="9,0,22,0" TextElement.Foreground="#4D6374" TextElement.FontSize="12">
+
+  <Grid>
+    <Grid.Background>
+      <LinearGradientBrush StartPoint="0,0" EndPoint="0.4,1">
+        <GradientStop Color="#F8FBFC" Offset="0"/>
+        <GradientStop Color="#F1F6F8" Offset="0.55"/>
+        <GradientStop Color="#EDF4F6" Offset="1"/>
+      </LinearGradientBrush>
+    </Grid.Background>
+    <Ellipse Width="620" Height="420" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-190,-120,0"
+             IsHitTestVisible="False">
+      <Ellipse.Fill>
+        <RadialGradientBrush>
+          <GradientStop Color="#2214B8A6" Offset="0"/>
+          <GradientStop Color="#0014B8A6" Offset="1"/>
+        </RadialGradientBrush>
+      </Ellipse.Fill>
+    </Ellipse>
+
+    <Grid Margin="28,20,28,16">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+
+      <!-- Header -->
+      <StackPanel Grid.Row="0">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" Orientation="Horizontal">
+            <Border Width="38" Height="38" CornerRadius="11" Background="{DynamicResource BrandGradientBrush}"
+                    VerticalAlignment="Top" Effect="{DynamicResource CardShadowSoft}">
+              <Path Data="{DynamicResource IconDrive}" Fill="{DynamicResource WhiteBrush}" Width="21" Height="21"
+                    Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <StackPanel Margin="13,0,0,0" VerticalAlignment="Center">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="磁盘空间管理器" Style="{DynamicResource PageTitle}"/>
+                <Border Background="{DynamicResource AccentSoftBrush}" CornerRadius="20" Padding="8,2" Margin="10,1,0,0"
+                        VerticalAlignment="Center">
+                  <TextBlock x:Name="AppVersion" AutomationProperties.AutomationId="AppVersion" FontSize="11"
+                             FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}" VerticalAlignment="Center"/>
+                </Border>
+              </StackPanel>
+              <TextBlock Text="查看磁盘、文件夹和文件的空间占用，快速回收空间" Style="{DynamicResource Subtitle}" Margin="1,3,0,0"/>
+            </StackPanel>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="16,2,0,0">
+            <Border Style="{DynamicResource Pill}" Background="{DynamicResource SurfaceBrush}" Padding="10,5" Margin="0,0,10,0"
+                    VerticalAlignment="Center">
+              <StackPanel Orientation="Horizontal">
+                <Path Data="{DynamicResource IconClock}" Stroke="{DynamicResource InkMutedBrush}" StrokeThickness="1.8"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="13" Height="13" Stretch="Uniform"
+                      VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBlock x:Name="Stamp" Text="正在准备快照" FontSize="11.5" Foreground="{DynamicResource InkSecondaryBrush}"
+                           VerticalAlignment="Center"/>
+              </StackPanel>
+            </Border>
+            <Button x:Name="CheckUpdates" AutomationProperties.AutomationId="CheckUpdates" Style="{DynamicResource BaseButton}"
+                    ToolTip="查询 GitHub 上的最新稳定版本" VerticalAlignment="Center">
+              <StackPanel Orientation="Horizontal">
+                <Path Data="{DynamicResource IconUpdate}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                      StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                      Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
+                <TextBlock Text="检查更新" VerticalAlignment="Center"/>
+              </StackPanel>
+            </Button>
+          </StackPanel>
+        </Grid>
+        <Border x:Name="UpdateNoticePanel" Visibility="Collapsed" Margin="49,10,0,0"
+                Background="{DynamicResource WarningSoftBrush}" BorderBrush="{DynamicResource WarningBorderBrush}"
+                BorderThickness="1" CornerRadius="10" Padding="12,8">
+          <StackPanel Orientation="Horizontal">
+            <Path x:Name="UpdateNoticeIcon" Data="{DynamicResource IconInfo}" Stroke="{DynamicResource WarningBrush}" StrokeThickness="1.8"
+                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="15" Height="15" Stretch="Uniform"
+                  VerticalAlignment="Top" Margin="0,1,8,0"/>
+            <TextBlock x:Name="UpdateNotice" AutomationProperties.AutomationId="UpdateNotice" FontSize="12"
+                       Foreground="{DynamicResource WarningTextBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Border>
+      </StackPanel>
+
+      <!-- Drive overview -->
+      <WrapPanel x:Name="DriveCards" Grid.Row="1" Margin="0,18,0,0"/>
+
+      <!-- Usage surface -->
+      <Border Grid.Row="2" Style="{DynamicResource SurfaceCard}" Margin="0,18,0,0" ClipToBounds="True">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <!-- Command bar -->
+          <Grid Grid.Row="0" Margin="16,13,16,0">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*"/><ColumnDefinition Width="108"/><ColumnDefinition Width="140"/>
-              <ColumnDefinition Width="98"/><ColumnDefinition Width="64"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Text="文件夹 / 文件" Margin="30,0" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="1" Text="占用空间 ↓" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="2" Text="占父目录" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="3" Text="文件大小" HorizontalAlignment="Right" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="4" Text="跳转" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <WrapPanel Grid.Column="0" VerticalAlignment="Center">
+              <Button x:Name="Refresh" AutomationProperties.AutomationId="Refresh" Style="{DynamicResource SoftButton}"
+                      ToolTip="重新扫描（F5）" Margin="0,0,6,0">
+                <StackPanel Orientation="Horizontal">
+                  <Path Data="{DynamicResource IconRefresh}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                        StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                        Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
+                  <TextBlock Text="刷新" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="CancelScan" AutomationProperties.AutomationId="CancelScan" Style="{DynamicResource GhostButton}"
+                      Visibility="Collapsed" Margin="0,0,6,0">
+                <StackPanel Orientation="Horizontal">
+                  <Path Data="{DynamicResource IconClose}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                        StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                        Width="12" Height="12" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
+                  <TextBlock Text="取消扫描" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Border Width="1" Height="18" Background="{DynamicResource DividerBrush}" Margin="4,0,8,0" VerticalAlignment="Center"/>
+              <Border Style="{DynamicResource Pill}" Background="{DynamicResource SurfaceSunkenBrush}" BorderBrush="Transparent"
+                      Padding="10,4.5" Margin="0,0,8,0" VerticalAlignment="Center">
+                <TextBlock x:Name="SelectionCount" AutomationProperties.AutomationId="SelectionCount" Text="已选 0 项"
+                           FontSize="11.5" Foreground="{DynamicResource InkSecondaryBrush}"/>
+              </Border>
+              <Button x:Name="ClearSelection" AutomationProperties.AutomationId="ClearSelection" Style="{DynamicResource GhostButton}"
+                      Content="清空选择" IsEnabled="False" Margin="0,0,6,0"/>
+              <Button x:Name="RecycleReport" AutomationProperties.AutomationId="RecycleReport" Content="查看处理结果"
+                      Style="{DynamicResource GhostButton}" Visibility="Collapsed" Margin="0,0,6,0"/>
+              <TextBlock x:Name="RecycleSummary" FontSize="11.5" Foreground="{DynamicResource InkMutedBrush}"
+                         VerticalAlignment="Center" Margin="2,0,0,0"/>
+            </WrapPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+              <Button x:Name="RecycleSelection" AutomationProperties.AutomationId="RecycleSelection"
+                      Style="{DynamicResource DangerSoftButton}" IsEnabled="False">
+                <StackPanel Orientation="Horizontal">
+                  <Path Data="{DynamicResource IconTrash}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                        StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                        Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,7,0"/>
+                  <TextBlock Text="移入回收站" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+            </StackPanel>
           </Grid>
-        </Border>
-        <TreeView x:Name="UsageTree" AutomationProperties.AutomationId="UsageTree" Grid.Row="1" BorderThickness="0" Background="White"
-            ItemTemplate="{StaticResource Row}" ScrollViewer.VerticalScrollBarVisibility="Visible" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-            ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
-            VirtualizingPanel.ScrollUnit="Pixel"/>
-        <StackPanel x:Name="Empty" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16">
-          <TextBlock Text="暂无磁盘快照" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center"/>
-          <TextBlock Text="扫描完成后，可以在这里展开磁盘、查看文件并管理空间。" Margin="0,7,0,0" Foreground="#637A89"/>
-        </StackPanel>
-        <Border Grid.Row="2" Background="#F8FAFB" BorderBrush="#E8EFF0" BorderThickness="0,1,0,0" CornerRadius="0,0,7,7">
-          <TextBlock x:Name="Selection" Margin="13,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" FontSize="12" Foreground="#425D70"/>
-        </Border>
-      </Grid>
-    </Border>
-    <TextBlock Grid.Row="4" Margin="1,9,0,0" FontSize="11" Foreground="#576C7A" TextWrapping="Wrap"
-        Text="目录合计按文件路径累计，硬链接可能重复计入。目录链接跳过，受限和未知项目仅计入已读部分。磁盘用量取自系统。"/>
+
+          <!-- Status line -->
+          <Grid Grid.Row="1" Margin="18,10,18,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal">
+              <Ellipse x:Name="StatusDot" Width="7" Height="7" Fill="{DynamicResource InkFaintBrush}"
+                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+              <TextBlock x:Name="ScanStatus" AutomationProperties.AutomationId="ScanStatus" FontSize="12"
+                         Foreground="{DynamicResource InkSecondaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </StackPanel>
+            <Border Grid.Column="1" Background="{DynamicResource SurfaceMutedBrush}" CornerRadius="6" Padding="7,2"
+                    VerticalAlignment="Center" Margin="12,0,0,0">
+              <TextBlock Text="F5 重新扫描" FontSize="10.5" Foreground="{DynamicResource InkFaintBrush}"/>
+            </Border>
+          </Grid>
+
+          <Grid Grid.Row="2">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="10"/>
+            </Grid.RowDefinitions>
+            <ProgressBar x:Name="ScanProgress" AutomationProperties.AutomationId="ScanProgress" Height="3"
+                         Margin="18,9,18,0" IsIndeterminate="True" Visibility="Collapsed"/>
+          </Grid>
+
+          <!-- Column header -->
+          <Border Grid.Row="3" Background="{DynamicResource SurfaceMutedBrush}" BorderBrush="{DynamicResource DividerBrush}"
+                  BorderThickness="0,1,0,1">
+            <Grid Height="38" Margin="18,0,14,0" TextElement.Foreground="{DynamicResource InkMutedBrush}">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="{StaticResource ColSize}"/>
+                <ColumnDefinition Width="{StaticResource ColShare}"/>
+                <ColumnDefinition Width="{StaticResource ColLogical}"/>
+                <ColumnDefinition Width="{StaticResource ColAction}"/>
+              </Grid.ColumnDefinitions>
+              <TextBlock Grid.Column="0" Text="文件夹 / 文件" Style="{DynamicResource ColumnHeader}" Margin="80,0,0,0"
+                         VerticalAlignment="Center"/>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <TextBlock Text="占用空间" Style="{DynamicResource ColumnHeader}"/>
+                <Path Data="{DynamicResource IconChevronDown}" Stroke="{DynamicResource AccentBrush}" StrokeThickness="2.2"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="8" Height="8" Stretch="Uniform"
+                      VerticalAlignment="Center" Margin="4,0,0,0"/>
+              </StackPanel>
+              <TextBlock Grid.Column="2" Text="占父目录" Style="{DynamicResource ColumnHeader}" HorizontalAlignment="Right"
+                         VerticalAlignment="Center" Margin="0,0,66,0"/>
+              <TextBlock Grid.Column="3" Text="文件大小" Style="{DynamicResource ColumnHeader}" HorizontalAlignment="Right"
+                         VerticalAlignment="Center"/>
+              <TextBlock Grid.Column="4" Text="操作" Style="{DynamicResource ColumnHeader}" HorizontalAlignment="Center"
+                         VerticalAlignment="Center"/>
+            </Grid>
+          </Border>
+
+          <!-- Tree -->
+          <Grid Grid.Row="4" ClipToBounds="True">
+            <TreeView x:Name="UsageTree" AutomationProperties.AutomationId="UsageTree" BorderThickness="0"
+                      Background="Transparent" Padding="0" Margin="18,2,14,0" FocusVisualStyle="{x:Null}"
+                      ItemTemplate="{StaticResource Row}" ScrollViewer.VerticalScrollBarVisibility="Visible"
+                      ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.CanContentScroll="True"
+                      VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                      VirtualizingPanel.ScrollUnit="Pixel"/>
+            <StackPanel x:Name="Empty" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="24">
+              <Grid Width="88" Height="88" HorizontalAlignment="Center">
+                <Ellipse Fill="{DynamicResource AccentWashBrush}"/>
+                <Ellipse Width="64" Height="64" Fill="{DynamicResource AccentSoftBrush}"/>
+                <Path Data="{DynamicResource IconDrive}" Fill="{DynamicResource AccentBrush}" Width="30" Height="30"
+                      Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0.85"/>
+              </Grid>
+              <TextBlock x:Name="EmptyTitle" Text="暂无磁盘快照" FontFamily="{DynamicResource DisplayFont}" FontSize="19"
+                         FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,16,0,0"/>
+              <TextBlock x:Name="EmptyNote" Text="扫描完成后，可以在这里展开磁盘、查看文件并管理空间。" FontSize="12.5"
+                         Foreground="{DynamicResource InkMutedBrush}" Margin="0,7,0,0" MaxWidth="430"
+                         TextAlignment="Center" TextWrapping="Wrap" HorizontalAlignment="Center"/>
+            </StackPanel>
+          </Grid>
+
+          <!-- Selection detail -->
+          <Border Grid.Row="5" Background="{DynamicResource SurfaceMutedBrush}" BorderBrush="{DynamicResource DividerBrush}"
+                  BorderThickness="0,1,0,0" CornerRadius="0,0,16,16" Padding="18,9" MinHeight="38">
+            <DockPanel>
+              <Path Data="{DynamicResource IconInfo}" Stroke="{DynamicResource InkFaintBrush}" StrokeThickness="1.8"
+                    StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="13" Height="13" Stretch="Uniform"
+                    VerticalAlignment="Center" Margin="0,0,8,0" DockPanel.Dock="Left"/>
+              <TextBlock x:Name="Selection" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" FontSize="11.5"
+                         Foreground="{DynamicResource InkSecondaryBrush}"/>
+            </DockPanel>
+          </Border>
+        </Grid>
+      </Border>
+
+      <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="2,12,0,0">
+        <Path Data="{DynamicResource IconInfo}" Stroke="{DynamicResource InkFaintBrush}" StrokeThickness="1.8"
+              StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="12" Height="12" Stretch="Uniform"
+              VerticalAlignment="Center" Margin="0,0,7,0"/>
+        <TextBlock FontSize="11" Foreground="{DynamicResource InkMutedBrush}" TextWrapping="Wrap" VerticalAlignment="Center"
+                   Text="目录合计按文件路径累计，硬链接可能重复计入；目录链接跳过，受限和未知项目仅计入已读部分。磁盘用量取自系统。"/>
+      </StackPanel>
+    </Grid>
   </Grid>
 </Window>
