@@ -4,9 +4,10 @@ import argparse
 import ctypes as ct
 from ctypes import wintypes as wt
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
 import itertools
+import json
 import multiprocessing
 import os
 from pathlib import Path
@@ -17,6 +18,8 @@ import struct
 import sys
 import tempfile
 import time
+
+import usn
 
 
 kernel = ct.WinDLL("kernel32", use_last_error=True)
@@ -38,6 +41,8 @@ get_compressed_size = winfunc("GetCompressedFileSizeW", wt.DWORD, wt.LPCWSTR,
                               ct.POINTER(wt.DWORD))
 get_drives = winfunc("GetLogicalDrives", wt.DWORD)
 get_drive_type = winfunc("GetDriveTypeW", wt.UINT, wt.LPCWSTR)
+get_volume_info = winfunc("GetVolumeInformationW", wt.BOOL, wt.LPCWSTR, wt.LPWSTR, wt.DWORD,
+                          wt.LPVOID, wt.LPVOID, wt.LPVOID, wt.LPWSTR, wt.DWORD)
 set_error_mode = winfunc("SetErrorMode", wt.UINT, wt.UINT)
 get_legacy_info = winfunc("GetFileInformationByHandle", wt.BOOL, wt.HANDLE, wt.LPVOID)
 device_io = winfunc("DeviceIoControl", wt.BOOL, wt.HANDLE, wt.DWORD, wt.LPVOID,
@@ -51,23 +56,31 @@ BUFFER_SIZE = 65536
 HEADER = struct.Struct("<I36xqqII4xI16s")
 FULL_HEADER = struct.Struct("<I36xqqIII")
 EMPTY_ID = bytes(16)
-INSERT_ENTRY = "INSERT INTO entries(parent,name,bytes,logical_bytes,flags,fsid) VALUES (?,?,?,?,?,?)"
-INSERT_DIR = "INSERT INTO dirs VALUES (?,?,?,?,?,?,?,?,?)"
+INSERT_ENTRY = "INSERT INTO entries(parent,name,bytes,logical_bytes,flags,fsid,root_id) VALUES (?,?,?,?,?,?,?)"
+INSERT_DIR = "INSERT INTO dirs VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+SNAPSHOT_VERSION = 1
 SCHEMA = """
 CREATE TABLE dirs (
     id INTEGER PRIMARY KEY, parent INTEGER, name TEXT NOT NULL, bytes INTEGER NOT NULL,
     direct_bytes INTEGER NOT NULL, files INTEGER NOT NULL, flags INTEGER NOT NULL,
-    logical_bytes INTEGER NOT NULL, fsid BLOB
+    logical_bytes INTEGER NOT NULL, fsid BLOB, root_id INTEGER NOT NULL, scan_error INTEGER NOT NULL
 );
 CREATE TABLE entries (
     id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, bytes INTEGER,
-    logical_bytes INTEGER NOT NULL, flags INTEGER NOT NULL, fsid BLOB
+    logical_bytes INTEGER NOT NULL, flags INTEGER NOT NULL, fsid BLOB, root_id INTEGER NOT NULL
 );
 CREATE TABLE volumes (
     root_id INTEGER PRIMARY KEY, total_bytes INTEGER, free_bytes INTEGER, started TEXT,
     finished TEXT, unique_bytes INTEGER, duplicate_files INTEGER, unknown_files INTEGER,
     serial INTEGER
 );
+CREATE TABLE checkpoints (
+    root_id INTEGER PRIMARY KEY, journal BLOB NOT NULL, position INTEGER NOT NULL, scope TEXT NOT NULL
+);
+CREATE TABLE pending_changes (
+    root_id INTEGER NOT NULL, fsid BLOB NOT NULL, parent_fsid BLOB NOT NULL,
+    reason INTEGER NOT NULL, attrs INTEGER NOT NULL, PRIMARY KEY(root_id, fsid)
+) WITHOUT ROWID;
 """
 
 
@@ -238,9 +251,11 @@ def connect(path):
 
 
 class Directory:
-    def __init__(self, ident, parent, path, name, flags=0, fsid=None):
+    def __init__(self, ident, parent, path, name, flags=0, fsid=None, root_id=None):
         self.ident, self.parent, self.path, self.name = ident, parent, path, name
         self.flags, self.fsid = flags, fsid
+        self.root_id = ident if root_id is None else root_id
+        self.scan_error = 0
         self.total = self.direct = self.files = self.logical = 0
 
     def include(self, child):
@@ -254,7 +269,7 @@ class Directory:
 
     def row(self):
         return (self.ident, self.parent, self.name, self.total, self.direct, self.files,
-                self.flags, self.logical, self.fsid)
+                self.flags, self.logical, self.fsid, self.root_id, self.scan_error)
 
 
 class Cancelled(Exception):
@@ -312,6 +327,7 @@ def directory_entries(node, root, buffer):
         if (node.fsid and fsid and node.fsid != fsid) or (
                 root.serial is not None and serial is not None and serial != root.serial):
             node.flags |= 1
+            node.scan_error = 1
             node.fsid = None
             return
         if fsid is not None:
@@ -333,6 +349,17 @@ def fallback_id(path, serial):
         except OSError:
             pass
     return None
+
+
+def file_values(path, logical, raw_alloc, attr, tag, fsid):
+    amount = raw_alloc
+    if attr & (SPARSE | COMPRESSED | REPARSE) or (logical and raw_alloc == 0):
+        amount = allocation(path, logical, raw_alloc, attr, tag)
+    flags = 2 if attr & REPARSE else 0
+    if amount is None or amount < 0:
+        amount = None
+        flags |= 1
+    return amount, logical, flags, fsid
 
 
 def write_forest(db, trees, root_dir, counters, ignored, cancel, progress, deferred=None, spine=None):
@@ -380,20 +407,15 @@ def write_forest(db, trees, root_dir, counters, ignored, cancel, progress, defer
                         fsid = fallback_id(prefix + name, root_dir.serial)
                     if attr & DIRECTORY:
                         flags = 2 if attr & REPARSE else 0
-                        child = Directory(next(counters), node.ident, prefix + name, name, flags, fsid)
+                        child = Directory(next(counters), node.ident, prefix + name, name,
+                                          flags, fsid, root_dir.ident)
                         if deferred is not None and not flags and (depth >= 2 or len(stack) >= 512):
                             deferred.append(child)
                         else:
                             stack.append((child, node, depth + 1, False))
                         continue
-                    if attr & (SPARSE | COMPRESSED | REPARSE) or (logical and raw_alloc == 0):
-                        amount = allocation(prefix + name, logical, raw_alloc, attr, tag)
-                    else:
-                        amount = raw_alloc
-                    flags = 2 if attr & REPARSE else 0
-                    if amount is None or amount < 0:
-                        amount = None
-                        flags |= 1
+                    amount, logical, flags, fsid = file_values(prefix + name, logical, raw_alloc, attr, tag, fsid)
+                    if amount is None:
                         node.flags |= 1
                         unknown += 1
                     else:
@@ -402,12 +424,13 @@ def write_forest(db, trees, root_dir, counters, ignored, cancel, progress, defer
                     node.logical += logical
                     node.files += 1
                     file_count += 1
-                    files.append((node.ident, name, amount, logical, flags, fsid))
+                    files.append((node.ident, name, amount, logical, flags, fsid, root_dir.ident))
                     if len(files) >= 8192:
                         db.executemany(INSERT_ENTRY, files)
                         files.clear()
             except OSError:
                 node.flags |= 1
+                node.scan_error = 1
         if len(dirs) >= 4096:
             db.executemany(INSERT_DIR, dirs)
             dirs.clear()
@@ -422,9 +445,11 @@ def merge_shards(db, others):
         db.execute("ATTACH DATABASE ? AS source", (str(path),))
         with db:
             db.execute("INSERT INTO dirs SELECT * FROM source.dirs")
-            db.execute("""INSERT INTO entries(parent,name,bytes,logical_bytes,flags,fsid)
-                          SELECT parent,name,bytes,logical_bytes,flags,fsid FROM source.entries""")
+            db.execute("""INSERT INTO entries(parent,name,bytes,logical_bytes,flags,fsid,root_id)
+                          SELECT parent,name,bytes,logical_bytes,flags,fsid,root_id FROM source.entries""")
             db.execute("INSERT INTO volumes SELECT * FROM source.volumes")
+            db.execute("INSERT INTO checkpoints SELECT * FROM source.checkpoints")
+            db.execute("INSERT INTO pending_changes SELECT * FROM source.pending_changes")
         db.execute("DETACH DATABASE source")
         Path(path).unlink()
 
@@ -465,10 +490,40 @@ def scan_partitions(trees, root_dir, first_id, stride, workers, stage, index, ig
     return paths, run_workers(scan_branches, tasks, workers, cancel, on_progress)
 
 
-def scan_volume(root, index, stride, stage, ignored, cancel_file=None):
+def change_journal(root):
+    return usn.open_journal(root, create_file, INVALID_HANDLE, close_handle, device_io, get_drive_type)
+
+
+def journal_identity(root):
+    drive_root = os.path.splitdrive(root)[0] + "\\"
+    filesystem = ct.create_unicode_buffer(16)
+    if not get_volume_info(drive_root, None, 0, None, None, None, filesystem, len(filesystem)) or filesystem.value != "NTFS":
+        raise usn.Unavailable("The scan root is not on an NTFS drive")
+    with handle(native(root), 0x80) as opened:
+        if attributes(opened)[0] & REPARSE:
+            raise usn.Unavailable("The scan root is a reparse point")
+        serial, fsid = identity(opened)
+    with handle(native(drive_root), 0x80) as drive:
+        if serial is None or not fsid or fsid[8:] != usn.ID_PADDING or serial != identity(drive)[0]:
+            raise usn.Unavailable("The scan root does not match the journal volume")
+    return serial, fsid
+
+
+def baseline_position(root):
+    try:
+        with change_journal(root) as journal:
+            ident, _, position = journal.position()
+            journal.page(ident, position)
+            return ident, position, *journal_identity(root)
+    except (OSError, usn.Unavailable):
+        return None
+
+
+def scan_volume(root, index, stride, stage, ignored, scope, cancel_file=None, base_id=0):
     started = now()
-    shard = Path(stage) / f"volume-{index}.sqlite"
-    counters = itertools.count(index + 1, stride)
+    shard_index = base_id + index
+    shard = Path(stage) / f"volume-{shard_index}.sqlite"
+    counters = itertools.count(base_id + index + 1, stride)
     root_dir = Directory(next(counters), None, native(root), root)
     root_dir.serial = None
     cancel = Cancellation(cancel_file)
@@ -479,6 +534,7 @@ def scan_volume(root, index, stride, stage, ignored, cancel_file=None):
     def progress(dirs, files):
         report("SCAN", root, dirs, files)
 
+    checkpoint = baseline_position(root)
     db = connect(shard)
     try:
         db.set_progress_handler(cancel.interrupt_sql, 25000)
@@ -492,7 +548,7 @@ def scan_volume(root, index, stride, stage, ignored, cancel_file=None):
             if len(deferred) >= 48:
                 db.commit()
                 paths, batches = scan_partitions(deferred, root_dir, next(counters), stride, workers,
-                                                 stage, index, ignored, cancel, branch_progress)
+                                                 stage, shard_index, ignored, cancel, branch_progress)
                 report("STAGE", f"正在合并 {root} 的目录统计")
                 merge_shards(db, paths)
             else:
@@ -523,6 +579,10 @@ def scan_volume(root, index, stride, stage, ignored, cancel_file=None):
         db.execute("INSERT INTO volumes VALUES (?,?,?,?,?,?,?,?,?)",
                    (root_dir.ident, total_bytes, free_bytes, started, finished, unique, duplicates,
                     unknown, root_dir.serial))
+        if (checkpoint and checkpoint[2:] == (root_dir.serial, root_dir.fsid)
+                and not root_dir.flags & 2
+                and not db.execute("SELECT 1 FROM dirs WHERE fsid IS NULL AND flags & 2 = 0 LIMIT 1").fetchone()):
+            db.execute("INSERT INTO checkpoints VALUES (?,?,?,?)", (root_dir.ident, *checkpoint[:2], scope))
         db.commit()
     except sqlite3.OperationalError:
         cancel.check(force=True)
@@ -606,14 +666,310 @@ def run_workers(work, tasks, workers, cancel, receive):
         messages.join_thread()
 
 
-def scan_roots(roots, stage, ignored, cancel):
+def scan_roots(roots, stage, ignored, scopes, cancel, base_id=0):
     if len(roots) == 1:
-        return [scan_volume(roots[0], 0, 1, stage, ignored, cancel.path)]
-    tasks = [(root, i, len(roots), stage, ignored) for i, root in enumerate(roots)]
+        root = roots[0]
+        return [scan_volume(root, 0, 1, stage, ignored, scopes[root], cancel.path, base_id)]
+    tasks = [(root, i, len(roots), stage, ignored, scopes[root], None, base_id) for i, root in enumerate(roots)]
     return run_workers(scan_volume, tasks, min(len(roots), 4), cancel, emit)
 
 
-def run(output, exclude=None, root=None, cancel_file=None):
+def scan_scope(root, ignored, elevated):
+    prefix = native(root).casefold().rstrip("\\") + "\\"
+    # A run's scratch files are always excluded. Persist only stable exclusions
+    # inside this root so relocating the output outside the tree is harmless.
+    return json.dumps([elevated, sorted(p for p in ignored if p.startswith(prefix))])
+
+
+class VolumeRefresh:
+    def __init__(self, db, root, root_id, fsid, serial, scope, ignored, next_id, cancel):
+        self.db, self.root, self.cancel = db, root, cancel
+        self.root_dir = Directory(root_id, None, native(root), root, fsid=fsid)
+        self.root_dir.serial = serial
+        self.scope, self.ignored = scope, ignored
+        self.ids = next_id
+        self.locations = {root_id: (0, self.root_dir.path, None, root, fsid)}
+        self.buffer = ct.create_string_buffer(BUFFER_SIZE)
+
+    def location(self, directory):
+        chain = []
+        while directory not in self.locations:
+            parent, name, fsid = self.db.execute("SELECT parent,name,fsid FROM dirs WHERE id=?", (directory,)).fetchone()
+            chain.append((directory, parent, name, fsid))
+            directory = parent
+        depth, path, *_ = self.locations[directory]
+        for ident, parent, name, fsid in reversed(chain):
+            depth, path = depth + 1, os.path.join(path, name)
+            self.locations[ident] = (depth, path, parent, name, fsid)
+        return self.locations[chain[0][0] if chain else directory]
+
+    def journal_changes(self, checkpoint):
+        ident, start, scope = checkpoint
+        root_id = self.root_dir.ident
+        if scope != self.scope or journal_identity(self.root) != (self.root_dir.serial, self.root_dir.fsid):
+            raise usn.Unavailable("The scan root or exclusions have changed")
+        pending = {fsid: (parent, reason, attrs) for fsid, parent, reason, attrs in self.db.execute(
+            "SELECT fsid,parent_fsid,reason,attrs FROM pending_changes WHERE root_id=?", (root_id,))}
+        parents = {parent for parent, _, _ in pending.values()}
+        changed = {fsid for fsid, (_, _, attrs) in pending.items() if not attrs & DIRECTORY}
+        rebuild = {fsid for fsid, (_, reason, attrs) in pending.items()
+                   if attrs & DIRECTORY and reason & usn.SECURITY_OR_REPARSE}
+        with change_journal(self.root) as journal:
+            current, first, end = journal.position()
+            if current != ident or not first <= start <= end:
+                raise usn.Unavailable("The saved position is outside the current NTFS journal")
+            for fsid, parent, reason, attrs in journal.changes(ident, start, end, self.cancel):
+                parents.add(parent)
+                if not attrs & DIRECTORY:
+                    changed.add(fsid)
+                elif reason & usn.SECURITY_OR_REPARSE:
+                    rebuild.add(fsid)
+                if reason & usn.CLOSE:
+                    pending.pop(fsid, None)
+                else:
+                    pending[fsid] = (parent, reason, attrs)
+        if self.root_dir.fsid in rebuild:
+            raise usn.Unavailable("Access or reparse metadata changed at the scan root")
+        return end, parents, changed, rebuild, pending
+
+    def remove_tree(self, directory):
+        subtree = """WITH RECURSIVE tree(id) AS (
+            VALUES (?) UNION ALL SELECT d.id FROM dirs d JOIN tree ON d.parent=tree.id
+        )"""
+        self.db.execute(subtree + " DELETE FROM entries WHERE parent IN (SELECT id FROM tree)", (directory,))
+        self.db.execute(subtree + " DELETE FROM dirs WHERE id IN (SELECT id FROM tree)", (directory,))
+
+    def refresh_directory(self, ident, rebuild):
+        _, path, parent, name, fsid = self.location(ident)
+        root_id = self.root_dir.ident
+        node = Directory(ident, parent, path, name, fsid=fsid, root_id=root_id)
+        files = {row[1]: (row[0], row[2:]) for row in self.db.execute(
+            "SELECT id,name,bytes,logical_bytes,flags,fsid FROM entries WHERE parent=?", (ident,))}
+        folders = {row[1]: (row[0], row[2], row[3] & 2) for row in self.db.execute(
+            "SELECT id,name,fsid,flags FROM dirs WHERE parent=?", (ident,))}
+        added, removed, trees = [], [], []
+        try:
+            for name, logical, raw_alloc, attr, tag, file_id in directory_entries(node, self.root_dir, self.buffer):
+                self.cancel.check()
+                child = os.path.join(path, name)
+                if child.casefold() in self.ignored:
+                    continue
+                if file_id is None:
+                    file_id = fallback_id(child, self.root_dir.serial)
+                if attr & DIRECTORY:
+                    flags = 2 if attr & REPARSE else 0
+                    existing = folders.get(name)
+                    if existing and existing[1:] == (file_id, flags) and file_id not in rebuild:
+                        del folders[name]
+                    else:
+                        trees.append(Directory(next(self.ids), ident, child, name, flags, file_id, root_id))
+                    continue
+                values = file_values(child, logical, raw_alloc, attr, tag, file_id)
+                old = files.pop(name, None)
+                if old is None or old[1] != values:
+                    if old:
+                        removed.append((old[0],))
+                    added.append((ident, name, *values, root_id))
+        except OSError:
+            node.scan_error = 1
+        if node.flags & 2 or node.fsid != fsid:
+            raise usn.Unavailable("A directory changed identity during the refresh")
+        self.db.executemany("DELETE FROM entries WHERE id=?", itertools.chain(removed, ((r[0],) for r in files.values())))
+        self.db.executemany(INSERT_ENTRY, added)
+        for directory, _, _ in folders.values():
+            self.cancel.check()
+            self.remove_tree(directory)
+        if trees:
+            write_forest(self.db, trees, self.root_dir, self.ids, self.ignored, self.cancel, lambda *_: None)
+        self.db.execute("UPDATE dirs SET scan_error=? WHERE id=?", (node.scan_error, ident))
+
+    def refresh_totals(self, directories):
+        for ident in sorted(directories, key=lambda d: self.location(d)[0], reverse=True):
+            self.cancel.check()
+            direct, files, logical, unknown = self.db.execute("""
+                SELECT coalesce(sum(bytes),0),count(*),coalesce(sum(logical_bytes),0),count(*)-count(bytes)
+                FROM entries WHERE parent=?
+            """, (ident,)).fetchone()
+            allocated, child_files, child_logical, partial, links = self.db.execute("""
+                SELECT coalesce(sum(bytes),0),coalesce(sum(files),0),coalesce(sum(logical_bytes),0),
+                       coalesce(max((flags & 5) != 0),0),coalesce(max((flags & 10) != 0),0)
+                FROM dirs WHERE parent=?
+            """, (ident,)).fetchone()
+            self.db.execute("""
+                UPDATE dirs SET bytes=?, direct_bytes=?, files=?, logical_bytes=?,
+                                flags=(scan_error OR ?) | ? WHERE id=?
+            """, (direct + allocated, direct, files + child_files, logical + child_logical,
+                  bool(unknown), 4 * partial | 8 * links, ident))
+
+    def file_totals(self, schema):
+        # Only groups with an inserted or deleted row can change the volume totals.
+        return self.db.execute(f"""
+            SELECT coalesce(sum(allocated),0),coalesce(sum(max(n-1,0)),0),coalesce(sum(unknown),0)
+            FROM (
+                SELECT max(e.bytes) AS allocated,count(*) AS n,count(*)-count(e.bytes) AS unknown
+                FROM changed_files c CROSS JOIN {schema}.entries e ON e.root_id=? AND e.fsid=c.fsid
+                WHERE c.entry_id=0 GROUP BY c.fsid
+                UNION ALL
+                SELECT e.bytes,1,e.bytes IS NULL FROM changed_files c
+                CROSS JOIN {schema}.entries e ON e.id=c.entry_id AND e.root_id=? AND e.fsid IS NULL
+                WHERE c.entry_id!=0
+            )
+        """, (self.root_dir.ident, self.root_dir.ident)).fetchone()
+
+    def run(self, checkpoint):
+        started = now()
+        end, parents, changed, rebuild, pending = self.journal_changes(checkpoint)
+        root_id = self.root_dir.ident
+        dirty, totals = set(), set()
+        for fsid in parents:
+            self.cancel.check()
+            dirty.update(ident for ident, in self.db.execute(
+                "SELECT id FROM dirs WHERE root_id=? AND fsid=? AND flags & 2 = 0", (root_id, fsid)))
+        for fsid in changed:
+            self.cancel.check()
+            dirty.update(ident for ident, in self.db.execute(
+                "SELECT parent FROM entries WHERE root_id=? AND fsid=?", (root_id, fsid)))
+        for fsid in rebuild:
+            dirty.update(ident for ident, in self.db.execute(
+                "SELECT parent FROM dirs WHERE root_id=? AND fsid=? AND parent IS NOT NULL", (root_id, fsid)))
+        emit("STAGE", f"正在增量刷新 {self.root}（{len(dirty)} 个待检查目录）")
+        emit("DELTA", self.root, 0, len(dirty))
+        next_report = time.monotonic() + 1
+        for index, ident in enumerate(sorted(dirty, key=lambda d: self.location(d)[0]), 1):
+            self.cancel.check()
+            # An earlier update may already have removed or rebuilt this subtree.
+            if self.db.execute("SELECT 1 FROM dirs WHERE id=?", (ident,)).fetchone():
+                self.refresh_directory(ident, rebuild)
+                while ident is not None and ident not in totals:
+                    totals.add(ident)
+                    ident = self.location(ident)[2]
+            if time.monotonic() >= next_report or index == len(dirty):
+                emit("DELTA", self.root, index, len(dirty))
+                next_report = time.monotonic() + 1
+        self.refresh_totals(totals)
+        before, after = self.file_totals("baseline"), self.file_totals("main")
+        unique, duplicates, unknown = (new - old for old, new in zip(before, after))
+        self.db.execute("""
+            UPDATE volumes SET started=?,finished=?,unique_bytes=unique_bytes+?,
+                               duplicate_files=duplicate_files+?,unknown_files=unknown_files+?
+            WHERE root_id=?
+        """, (started, now(), unique, duplicates, unknown, root_id))
+        if self.db.execute("SELECT 1 FROM dirs WHERE root_id=? AND fsid IS NULL AND flags & 2 = 0 LIMIT 1",
+                           (root_id,)).fetchone():
+            raise usn.Unavailable("A directory could not be identified")
+        self.db.execute("UPDATE checkpoints SET position=? WHERE root_id=?", (end, root_id))
+        self.db.execute("DELETE FROM pending_changes WHERE root_id=?", (root_id,))
+        self.db.executemany("INSERT INTO pending_changes VALUES (?,?,?,?,?)",
+                            ((root_id, fsid, *change) for fsid, change in pending.items()))
+
+
+def incremental_snapshot(previous, roots, stage, ignored, scopes, cancel):
+    previous = Path(previous).resolve()
+    uri = previous.as_uri() + "?mode=ro"
+    result = Path(stage) / "report.sqlite"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as source:
+            if source.execute("PRAGMA user_version").fetchone() != (SNAPSHOT_VERSION,):
+                return None
+            cached = dict((name, (ident, fsid, serial, journal, position, scope)) for
+                          name, ident, fsid, serial, journal, position, scope in source.execute("""
+                SELECT d.name,d.id,d.fsid,v.serial,c.journal,c.position,c.scope FROM dirs d
+                JOIN volumes v ON v.root_id=d.id LEFT JOIN checkpoints c ON c.root_id=d.id
+                WHERE d.parent IS NULL
+            """))
+            if not any(root in cached and cached[root][3] and cached[root][5] == scopes[root] for root in roots):
+                return None
+        emit("STAGE", "正在读取上次快照和磁盘变更日志")
+        with previous.open("rb") as reader, result.open("wb") as writer:
+            while block := reader.read(4 * 1024 * 1024):
+                cancel.check()
+                writer.write(block)
+        with closing(sqlite3.connect(result, uri=True)) as db:
+            db.set_progress_handler(cancel.interrupt_sql, 25000)
+            db.execute("PRAGMA synchronous=OFF")
+            db.execute("ATTACH DATABASE ? AS baseline", (uri,))
+            db.execute("CREATE TEMP TABLE changed_files(fsid BLOB,entry_id INTEGER,PRIMARY KEY(fsid,entry_id)) WITHOUT ROWID")
+            for event, row in (("INSERT", "new"), ("DELETE", "old")):
+                db.execute(f"""
+                    CREATE TEMP TRIGGER track_{row} AFTER {event} ON main.entries BEGIN
+                        INSERT OR IGNORE INTO changed_files VALUES (
+                            coalesce({row}.fsid,x''), CASE WHEN {row}.fsid IS NULL THEN {row}.id ELSE 0 END
+                        );
+                    END
+                """)
+            next_id = itertools.count(db.execute("SELECT coalesce(max(id),0)+1 FROM dirs").fetchone()[0])
+            full = []
+            db.execute("BEGIN")
+            for root in roots:
+                cancel.check(force=True)
+                old = cached.get(root)
+                if old and old[3]:
+                    ident, fsid, serial, journal, position, scope = old
+                    db.execute("SAVEPOINT refresh_volume")
+                    db.execute("DELETE FROM changed_files")
+                    try:
+                        VolumeRefresh(db, root, ident, fsid, serial, scopes[root], ignored, next_id, cancel).run(
+                            (journal, position, scope))
+                    except (OSError, usn.Unavailable):
+                        db.execute("ROLLBACK TO refresh_volume")
+                    else:
+                        db.execute("RELEASE refresh_volume")
+                        continue
+                    db.execute("RELEASE refresh_volume")
+                emit("STAGE", f"正在重新全量扫描 {root}（缺少可用的增量基线）")
+                full.append(root)
+            if len(full) == len(roots):
+                return None
+            db.execute("DROP TRIGGER track_new")
+            db.execute("DROP TRIGGER track_old")
+            for root, (ident, *_) in cached.items():
+                if root not in roots or root in full:
+                    for table in ("entries", "dirs", "volumes", "checkpoints", "pending_changes"):
+                        db.execute(f"DELETE FROM {table} WHERE root_id=?", (ident,))
+            db.commit()
+            db.execute("DETACH DATABASE baseline")
+            if full:
+                merge_shards(db, scan_roots(full, stage, ignored, scopes, cancel, next(next_id)))
+    except sqlite3.DatabaseError:
+        cancel.check(force=True)
+        return None
+    return result
+
+
+def validate_full_snapshot(db):
+    expected = db.execute("SELECT sum(files),sum(bytes),sum(logical_bytes) FROM dirs WHERE parent IS NULL").fetchone()
+    actual = db.execute("SELECT count(*),coalesce(sum(bytes),0),coalesce(sum(logical_bytes),0) FROM entries").fetchone()
+    if expected != actual or db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+        raise RuntimeError("Snapshot consistency check failed.")
+
+
+def full_snapshot(roots, stage, ignored, scopes, cancel):
+    shards = scan_roots(roots, stage, ignored, scopes, cancel)
+    cancel.check(force=True)
+    # Use the largest shard in place. SQLite allocates fresh entry IDs for the others.
+    result = Path(max(shards, key=os.path.getsize))
+    db = connect(result)
+    try:
+        db.set_progress_handler(cancel.interrupt_sql, 25000)
+        if len(shards) > 1:
+            emit("STAGE", "正在合并各磁盘的扫描结果")
+        merge_shards(db, (shard for shard in shards if Path(shard) != result))
+        emit("STAGE", "正在建立文件树和增量索引")
+        db.executescript(f"""
+            CREATE INDEX dirs_parent_bytes ON dirs(parent, bytes DESC, name);
+            CREATE INDEX entries_parent_bytes ON entries(parent, bytes DESC, name);
+            CREATE INDEX dirs_root_fsid ON dirs(root_id, fsid);
+            CREATE INDEX entries_root_fsid ON entries(root_id, fsid);
+            PRAGMA user_version={SNAPSHOT_VERSION};
+        """)
+        emit("STAGE", "正在校验目录汇总和数据库完整性")
+        validate_full_snapshot(db)
+    finally:
+        db.close()
+    return result
+
+
+def run(output, exclude=None, root=None, cancel_file=None, previous=None):
     set_error_mode(0x8001)
     cancel = Cancellation(cancel_file)
     cancel.check(force=True)
@@ -630,34 +986,21 @@ def run(output, exclude=None, root=None, cancel_file=None):
     if exclude and root and Path(root).is_relative_to(Path(exclude).absolute()):
         raise ValueError("扫描位置位于排除目录内。")
     with tempfile.TemporaryDirectory(dir=output.parent, prefix=".scan-") as stage:
-        ignored = {native(p).casefold() for p in
-                   (stage, output, exclude, cancel_file) if p}
-        shards = scan_roots(roots, stage, ignored, cancel)
-        cancel.check(force=True)
-        # Use the largest complete shard in place. Directory IDs already have
-        # disjoint ranges; SQLite allocates fresh entry rowids for other volumes.
-        result = Path(max(shards, key=os.path.getsize))
-        db = connect(result)
+        stable = {native(p).casefold() for p in (output, exclude, cancel_file) if p}
+        if exclude:
+            excluded = native(exclude).casefold().rstrip("\\") + "\\"
+            stable = {p for p in stable if not p.startswith(excluded)}
+        elevated = bool(ct.windll.shell32.IsUserAnAdmin())
+        scopes = {root: scan_scope(root, stable, elevated) for root in roots}
+        ignored = stable | {native(stage).casefold()}
         try:
-            db.set_progress_handler(cancel.interrupt_sql, 25000)
-            if len(shards) > 1:
-                emit("STAGE", "正在合并各磁盘的扫描结果")
-            merge_shards(db, (shard for shard in shards if Path(shard) != result))
-            emit("STAGE", "正在建立文件树排序索引")
-            db.executescript("""
-                CREATE INDEX dirs_parent_bytes ON dirs(parent, bytes DESC, name);
-                CREATE INDEX entries_parent_bytes ON entries(parent, bytes DESC, name);
-            """)
-            emit("STAGE", "正在校验目录汇总和数据库完整性")
-            expected = db.execute("SELECT sum(files),sum(bytes),sum(logical_bytes) FROM dirs WHERE parent IS NULL").fetchone()
-            actual = db.execute("SELECT count(*),coalesce(sum(bytes),0),coalesce(sum(logical_bytes),0) FROM entries").fetchone()
-            if expected != actual or db.execute("PRAGMA quick_check").fetchone() != ("ok",):
-                raise RuntimeError("Snapshot consistency check failed.")
+            result = incremental_snapshot(previous, roots, stage, ignored, scopes, cancel) if previous else None
+            if result is None:
+                emit("STAGE", "正在进行全量扫描")
+                result = full_snapshot(roots, stage, ignored, scopes, cancel)
         except sqlite3.OperationalError:
             cancel.check(force=True)
             raise
-        finally:
-            db.close()
         with result.open("rb+") as file:
             os.fsync(file.fileno())
         cancel.check(force=True)
@@ -681,9 +1024,10 @@ if __name__ == "__main__":
     parser.add_argument("--exclude", help="Application data directory to omit from the scan")
     parser.add_argument("--root", help="Scan only this directory (instead of all mounted drives)")
     parser.add_argument("--cancel-file", help="Cancel when this file appears")
+    parser.add_argument("--previous", type=Path, help="Published snapshot to use for incremental refresh")
     args = parser.parse_args()
     try:
-        run(args.output, args.exclude, args.root, args.cancel_file)
+        run(args.output, args.exclude, args.root, args.cancel_file, args.previous)
     except (Cancelled, KeyboardInterrupt):
         emit("CANCELLED")
         sys.exit(2)

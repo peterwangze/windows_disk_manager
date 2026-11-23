@@ -120,7 +120,7 @@ namespace UsageTree
         {
             if (scan != null || recycling || updateInProgress || closing) return;
             counters.Clear();
-            var run = new ScanRun(dataDirectory);
+            var run = new ScanRun(dataDirectory, Snapshot);
             scan = run;
             scanTime.Restart();
             ShowElapsed();
@@ -160,6 +160,15 @@ namespace UsageTree
                     counters.Values.Sum(n => n.Item1), counters.Values.Sum(n => n.Item2));
                 counts.ToolTip = String.Join(Environment.NewLine, counters.Select(n =>
                     String.Format("{0}   {1:N0} 个目录 / {2:N0} 个文件", n.Key, n.Value.Item1, n.Value.Item2)));
+            }
+            else if (words[0] == "DELTA" && words.Length >= 4)
+            {
+                long checkedDirs, totalDirs;
+                if (!Int64.TryParse(words[2], out checkedDirs) || !Int64.TryParse(words[3], out totalDirs)) return;
+                var counts = Control<TextBlock>("ScanCounts");
+                counts.Text = totalDirs == 0 ? "该磁盘没有需要更新的目录" :
+                    String.Format("已检查 {0:N0} / {1:N0} 个受影响目录", checkedDirs, totalDirs);
+                counts.ToolTip = words[1];
             }
             else if (words[0] == "STAGE" && words.Length >= 2) Control<TextBlock>("ScanStage").Text = words[1];
         }

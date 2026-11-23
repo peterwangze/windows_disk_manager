@@ -124,6 +124,110 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM entries").fetchone(), (161,))
             self.assertEqual(db.execute("SELECT count(*) FROM volumes").fetchone(), (2,))
 
+    def require_journal(self):
+        if scan.baseline_position(str(self.root)) is None:
+            self.skipTest("the test volume does not expose an NTFS change journal")
+
+    def test_incremental_matches_full_with_moves_deletions_and_links(self):
+        from benchmark_scan import snapshot
+
+        self.require_journal()
+        source, destination = self.root / "source", self.root / "destination"
+        source.mkdir()
+        destination.mkdir()
+        branch = source / "branch"
+        branch.mkdir()
+        (branch / "old.txt").write_bytes(bytes(9000))
+        empty = source / "empty"
+        empty.mkdir()
+        kept = source / "keep.bin"
+        kept.write_bytes(bytes(12000))
+        file = source / "original.bin"
+        file.write_bytes(bytes(12000))
+        alias = destination / "alias.bin"
+        os.link(file, alias)
+        external = self.root.parent / "external.bin"
+        external.write_bytes(bytes(12000))
+        exclude = self.root / "app-data"
+        exclude.mkdir()
+        (exclude / "ignored").touch()
+
+        self.assertEqual(self.command("--exclude", exclude).returncode, 0)
+        with closing(sqlite3.connect(self.output)) as db:
+            kept_id = db.execute("SELECT id FROM entries WHERE name=?", (kept.name,)).fetchone()
+
+        branch = branch.rename(destination / "moved")
+        (branch / "old.txt").unlink()
+        (branch / "new.txt").write_bytes(bytes(15000))
+        empty.rmdir()
+        file.write_bytes(bytes(120000))
+        alias.unlink()
+        os.link(file, destination / "another-name.bin")
+        os.link(external, destination / "link-from-outside.bin")
+        junction = destination / "junction"
+        _winapi.CreateJunction(str(self.root), str(junction))
+        self.addCleanup(os.rmdir, junction)
+        (exclude / "also-ignored").write_bytes(bytes(5000))
+
+        updated = self.command("--previous", self.output, "--exclude", exclude)
+        self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+        self.assertIn("DELTA\t", updated.stdout)
+        self.assertNotIn("SCAN\t", updated.stdout)
+        fresh = self.output.with_name("fresh.sqlite")
+        with patch.object(scan, "emit"):
+            scan.run(fresh, exclude, self.root)
+        self.assertEqual(snapshot(self.output), snapshot(fresh))
+        with closing(sqlite3.connect(self.output)) as db:
+            self.assertEqual(db.execute("SELECT id FROM entries WHERE name=?", (kept.name,)).fetchone(), kept_id)
+            self.assertEqual(db.execute("PRAGMA quick_check").fetchone(), ("ok",))
+
+    def test_expired_journal_rescans_only_the_affected_root(self):
+        from benchmark_scan import snapshot
+
+        self.require_journal()
+        other = self.root.parent / "second-root"
+        other.mkdir()
+        (other / "old").touch()
+        fresh = self.output.with_name("fresh.sqlite")
+        with patch.object(scan, "mounted_roots", return_value=[str(self.root), str(other)]), patch.object(scan, "emit") as log:
+            scan.run(self.output)
+            with closing(sqlite3.connect(self.output)) as db, db:
+                db.execute("UPDATE checkpoints SET position=-1 WHERE root_id=(SELECT id FROM dirs WHERE name=?)",
+                           (str(other),))
+            (self.root / "new").write_bytes(bytes(6000))
+            (other / "old").unlink()
+            (other / "new-too").write_bytes(bytes(8000))
+            log.reset_mock()
+            scan.run(self.output, previous=self.output)
+            events = [call.args for call in log.call_args_list]
+            self.assertTrue(any(event[:2] == ("DELTA", str(self.root)) for event in events))
+            self.assertEqual({event[1] for event in events if event[0] == "SCAN"}, {str(other)})
+            scan.run(fresh)
+        self.assertEqual(snapshot(self.output), snapshot(fresh))
+
+    def test_cancel_after_delta_keeps_snapshot_and_journal_position(self):
+        self.require_journal()
+        (self.root / "old").touch()
+        cancel = self.root.parent / "request-cancel"
+        original = scan.VolumeRefresh.refresh_directory
+
+        def cancel_after_refresh(refresh, *args):
+            original(refresh, *args)
+            cancel.touch()
+
+        with patch.object(scan, "emit"):
+            scan.run(self.output, root=self.root, cancel_file=cancel)
+            before = self.output.read_bytes()
+            (self.root / "new").touch()
+            with patch.object(scan.VolumeRefresh, "refresh_directory", cancel_after_refresh):
+                with self.assertRaises(scan.Cancelled):
+                    scan.run(self.output, root=self.root, cancel_file=cancel, previous=self.output)
+            self.assertEqual(self.output.read_bytes(), before)
+            cancel.unlink()
+            scan.run(self.output, root=self.root, cancel_file=cancel, previous=self.output)
+        with closing(sqlite3.connect(self.output)) as db:
+            self.assertEqual(db.execute("SELECT name FROM entries ORDER BY name").fetchall(), [("new",), ("old",)])
+
     @unittest.skipUnless(os.environ.get("WDM_SCANNER_EXE"), "set WDM_SCANNER_EXE to a frozen scanner")
     def test_frozen_workers_start_and_cancel(self):
         exe = os.environ["WDM_SCANNER_EXE"]

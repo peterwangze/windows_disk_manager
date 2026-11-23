@@ -97,15 +97,17 @@ namespace UsageTree
     {
         internal string Output { get; private set; }
         private readonly string dataDirectory;
+        private readonly string previousSnapshot;
         private readonly object gate = new object();
         private string stageDirectory;
         private int startRequested;
         private volatile bool cancelled, disposed, finished;
         internal bool Cancelled { get { return cancelled; } }
 
-        internal ScanRun(string directory)
+        internal ScanRun(string directory, string previousSnapshot)
         {
             dataDirectory = directory;
+            this.previousSnapshot = previousSnapshot;
         }
 
         // All arguments are filesystem paths. Windows doubles trailing backslashes before a closing quote.
@@ -149,6 +151,7 @@ namespace UsageTree
             if (!File.Exists(helper)) throw new FileNotFoundException("请将 DiskScanner.exe 和管理器放在同一目录。");
             string cancelPath = Path.Combine(stageDirectory, "cancel");
             string arguments = "--output " + QuotePath(Output) + " --exclude " + QuotePath(dataDirectory) + " --cancel-file " + QuotePath(cancelPath);
+            if (File.Exists(previousSnapshot)) arguments += " --previous " + QuotePath(previousSnapshot);
             string root = Environment.GetEnvironmentVariable("WDM_SCAN_ROOT");
             if (!String.IsNullOrWhiteSpace(root)) arguments += " --root " + QuotePath(Path.GetFullPath(root));
             var info = new ProcessStartInfo(helper, arguments) {
