@@ -24,6 +24,7 @@ namespace UsageTree
         private string StaleMarker { get { return Path.Combine(dataDirectory, "refresh-required"); } }
         private string activePath;
         private bool hasIdentities, closing, recycling, stale, disposed;
+        private bool initializing = true, refreshRequested;
         private ScanRun scan;
         private readonly HashSet<Node> picked = new HashSet<Node>();
         private string lastReport;
@@ -49,36 +50,51 @@ namespace UsageTree
                 else if (args.Key == Key.Escape && scan != null) { CancelRefresh(); args.Handled = true; }
             };
             window.Closing += OnClosing;
-            window.Loaded += delegate
-            {
-                ScanStaging.CleanAbandoned(dataDirectory);
-                stale = File.Exists(StaleMarker);
-                string path = File.Exists(Snapshot) ? Snapshot : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "disk-usage.sqlite");
-                bool local = String.Equals(path, Snapshot, StringComparison.OrdinalIgnoreCase);
-                if (File.Exists(path))
-                {
-                    try { OpenExisting(path); }
-                    catch (Exception ex) { SetStatus("现有快照无法读取：" + ex.GetBaseException().Message); }
-                }
-                if (db == null || !local || stale) BeginRefresh();
-                else SetStatus(hasIdentities ? "展开目录查看占用，勾选文件或目录可移入回收站。" : "当前为旧版快照。点击刷新即可启用勾选操作。");
-                SetControls();
-            };
+            window.Loaded += async delegate { await LoadInitialSnapshot(); };
         }
 
-        private void OpenExisting(string path)
+        private async Task LoadInitialSnapshot()
         {
-            var source = new Database(path);
+            SetEmpty("正在载入磁盘快照", "正在读取上次扫描结果。");
+            Database source = null;
+            string path = null;
+            bool ids = false, needsRefresh = false;
             try
             {
-                bool ids;
-                var incoming = ReadRoots(source, out ids);
-                db = source;
-                activePath = path;
-                hasIdentities = ids;
-                Display(incoming);
+                var incoming = await Task.Run(delegate
+                {
+                    ScanStaging.CleanAbandoned(dataDirectory);
+                    needsRefresh = File.Exists(StaleMarker);
+                    path = File.Exists(Snapshot) ? Snapshot : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "disk-usage.sqlite");
+                    if (!File.Exists(path)) return null;
+                    source = new Database(path);
+                    return ReadSnapshot(source, out ids);
+                });
+                await Dispatcher.Yield(DispatcherPriority.Background);
+                if (!disposed && !closing)
+                {
+                    stale = needsRefresh;
+                    if (incoming != null)
+                    {
+                        db = source;
+                        activePath = path;
+                        hasIdentities = ids;
+                        Display(incoming);
+                        source = null;
+                    }
+                }
             }
-            catch { source.Dispose(); db = null; throw; }
+            catch (Exception ex)
+            {
+                if (db == source) db = null;
+                if (!disposed && !closing) SetStatus("现有快照无法读取：" + ex.GetBaseException().Message);
+            }
+            if (source != null) await Task.Run((Action)source.Dispose);
+            initializing = false;
+            if (disposed || closing) return;
+            if (refreshRequested || db == null || stale || !String.Equals(path, Snapshot, StringComparison.OrdinalIgnoreCase)) BeginRefresh();
+            else SetStatus(hasIdentities ? "展开目录查看占用，勾选文件或目录可移入回收站。" : "当前为旧版快照。点击刷新即可启用勾选操作。");
+            SetControls();
         }
 
         private void SetStatus(string text)
@@ -119,6 +135,12 @@ namespace UsageTree
         private void BeginRefresh()
         {
             if (scan != null || recycling || updateInProgress || closing) return;
+            if (initializing)
+            {
+                refreshRequested = true;
+                SetStatus("正在载入上次快照，随后开始刷新。");
+                return;
+            }
             counters.Clear();
             var run = new ScanRun(dataDirectory, Snapshot);
             scan = run;
@@ -221,12 +243,10 @@ namespace UsageTree
                 using (var candidate = new Database(staged))
                 {
                     bool freshIds;
-                    var items = ReadRoots(candidate, out freshIds);
+                    var items = ReadSnapshot(candidate, out freshIds);
                     if (!freshIds) throw new InvalidDataException("扫描结果缺少文件标识。");
                     candidate.Query("SELECT id,parent,name,bytes,logical_bytes,flags,fsid FROM entries LIMIT 0", delegate {});
                     candidate.Query("SELECT id,parent,name,bytes,logical_bytes,flags,fsid,files FROM dirs LIMIT 0", delegate {});
-                    var root = items[0];
-                    AppendPage(root, ReadPage(candidate, root, freshIds));
                     return items;
                 }
             });
@@ -254,23 +274,30 @@ namespace UsageTree
                 activePath = Snapshot;
                 hasIdentities = true;
                 rebinding = true;
+                await Dispatcher.Yield(DispatcherPriority.Background);
                 Display(incoming);
                 // The worker cleans its staged backup after the new tree is on screen.
                 return;
             }
             catch (Exception ex) { failure = ex; }
 
-            if (db != null) { db.Dispose(); db = null; }
+            var failedDatabase = db;
+            db = null;
+            List<Node> previousRoots = null;
+            bool ids = false;
             db = await Task.Run(delegate
             {
+                if (failedDatabase != null) failedDatabase.Dispose();
                 if (replaced && backup != null) File.Replace(backup, Snapshot, null, true);
-                return previous == null ? null : new Database(previous);
+                if (previous == null) return null;
+                var source = new Database(previous);
+                try { if (rebinding) previousRoots = ReadSnapshot(source, out ids); }
+                catch { source.Dispose(); throw; }
+                return source;
             });
             activePath = previous;
-            if (rebinding && db != null)
+            if (previousRoots != null)
             {
-                bool ids;
-                var previousRoots = ReadRoots(db, out ids);
                 hasIdentities = ids;
                 Display(previousRoots);
             }
@@ -496,7 +523,9 @@ namespace UsageTree
         {
             disposed = true;
             if (scan != null) scan.Dispose();
-            if (db != null) db.Dispose();
+            var source = db;
+            db = null;
+            if (source != null) ThreadPool.QueueUserWorkItem(delegate { source.Dispose(); });
         }
     }
 }

@@ -92,6 +92,7 @@ namespace UsageTree
             get
             {
                 if (closing || disposed) return "应用正在关闭。";
+                if (initializing) return "正在载入磁盘快照。";
                 if (recycling) return "回收站操作完成后即可安装更新。";
                 if (scan != null) return "扫描结束后即可安装更新，也可以在主窗口取消扫描。";
                 return "";

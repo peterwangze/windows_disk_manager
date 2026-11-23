@@ -8,8 +8,10 @@ VersionInfoVersion={#AppVersion}.0
 VersionInfoProductVersion={#AppVersion}
 VersionInfoProductName=Windows Disk Manager
 VersionInfoDescription=磁盘空间管理器安装程序
-DefaultDirName={localappdata}\Programs\WindowsDiskManager\{#AppVersion}
-UsePreviousAppDir=no
+DefaultDirName={code:DefaultInstallDirectory}
+AppendDefaultDirName=no
+UsePreviousAppDir=not HasLegacyVersionDirectory
+DisableDirPage=no
 UsePreviousGroup=no
 UsePreviousLanguage=no
 DisableProgramGroupPage=yes
@@ -22,7 +24,7 @@ CloseApplications=no
 RestartApplications=no
 SetupIconFile=..\src\app.ico
 UninstallDisplayIcon={app}\WindowsDiskManager.exe
-UninstallFilesDir={code:UninstallDirectory}
+UninstallFilesDir={app}\uninstall
 CreateUninstallRegKey=not Isolated
 OutputDir={#DistDir}
 OutputBaseFilename=WindowsDiskManager-{#AppVersion}-win-x64-Setup
@@ -91,12 +93,41 @@ begin
   if Isolated then Result := Result + '.Isolated';
 end;
 
-function UninstallDirectory(Param: String): String;
+function LegacyVersionDirectory: String;
+var
+  Key, Path, VersionText: String;
+  Version: Int64;
 begin
-  if Isolated then
-    Result := ExpandConstant('{app}\uninstall')
+  Result := '';
+  if Isolated then exit;
+  Key := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + ApplicationId('') + '_is1';
+  if not RegQueryStringValue(HKCU, Key, 'Inno Setup: App Path', Path) then exit;
+  if not RegQueryStringValue(HKCU, Key, 'DisplayVersion', VersionText) then exit;
+  { The old installer offered the version as the default folder name, including
+    when selecting another drive. Migrate that layout once during upgrade. }
+  if not StrToVersion(VersionText + '.0', Version) then exit;
+  if ComparePackedVersion(Version, PackVersionComponents(1, 4, 0, 0)) > 0 then exit;
+  Path := RemoveBackslashUnlessRoot(Path);
+  if CompareText(ExtractFileName(Path), VersionText) = 0 then Result := Path;
+end;
+
+function HasLegacyVersionDirectory: Boolean;
+begin
+  Result := LegacyVersionDirectory <> '';
+end;
+
+function DefaultInstallDirectory(Param: String): String;
+var
+  Legacy, Parent: String;
+begin
+  Result := ExpandConstant('{localappdata}\Programs\WindowsDiskManager');
+  Legacy := LegacyVersionDirectory;
+  if Legacy = '' then exit;
+  Parent := ExtractFileDir(Legacy);
+  if CompareText(ExtractFileName(Parent), 'WindowsDiskManager') = 0 then
+    Result := Parent
   else
-    Result := ExpandConstant('{localappdata}\Programs\WindowsDiskManager\uninstall');
+    Result := AddBackslash(Parent) + 'WindowsDiskManager';
 end;
 
 function MenuDirectory(Param: String): String;

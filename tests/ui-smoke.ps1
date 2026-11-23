@@ -13,8 +13,14 @@ $null = New-Item -ItemType Directory -Path $fixture, $cache
 $first = 'wdm-smoke-alpha.txt'
 $second = 'wdm-smoke-beta.txt'
 $keep = 'wdm-smoke-keep.txt'
+$branch = 'wdm-smoke-expand'
+$nested = 'wdm-smoke-nested'
+$leaf = 'wdm-smoke-leaf.txt'
 [IO.File]::WriteAllText((Join-Path $fixture $first), 'first fixture file')
 [IO.File]::WriteAllText((Join-Path $fixture $keep), 'retained control')
+$nestedPath = Join-Path (Join-Path $fixture $branch) $nested
+$null = New-Item -ItemType Directory -Path $nestedPath -Force
+[IO.File]::WriteAllText((Join-Path $nestedPath $leaf), 'expand this directory')
 $desc = [System.Windows.Automation.TreeScope]::Descendants
 $ae = [System.Windows.Automation.AutomationElement]
 function Wait-For($description, [scriptblock]$read, [int]$timeout = 30) {
@@ -31,13 +37,18 @@ function By-Id($parent, $id) {
     return $parent.FindFirst($desc, $c)
 }
 function Row($name) {
-    $type = [System.Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, [System.Windows.Automation.ControlType]::TreeItem)
+    $type = [System.Windows.Automation.PropertyCondition]::new($ae::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
     $named = [System.Windows.Automation.PropertyCondition]::new($ae::NameProperty, $name)
     return $win.FindFirst($desc, [System.Windows.Automation.AndCondition]::new($type, $named))
 }
 function Invoke-Button($button) {
     if (!$button -or !$button.Current.IsEnabled) { throw 'Button is missing or disabled.' }
     $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+function Toggle-Directory($row) {
+    $toggle = By-Id $row 'ToggleDirectory'
+    if (!$toggle -or !$toggle.Current.IsEnabled) { throw 'Directory toggle is missing or disabled.' }
+    $toggle.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
 }
 function Confirm-Dialog {
     $control = Wait-For 'confirmation dialog' {
@@ -79,6 +90,14 @@ try {
         }
     }
     $null = Wait-For 'first-run scan' { (Row $first) -and (By-Id $win 'Refresh').Current.IsEnabled }
+    $anchor = (Row $branch).Current.BoundingRectangle.Top
+    Toggle-Directory (Row $branch)
+    $null = Wait-For 'first nested directory' { Row $nested }
+    Toggle-Directory (Row $nested)
+    $null = Wait-For 'file under second nested directory' { Row $leaf }
+    if ([Math]::Abs((Row $branch).Current.BoundingRectangle.Top - $anchor) -gt 1) { throw 'Expanded rows shifted the directory anchor.' }
+    Toggle-Directory (Row $branch)
+    $null = Wait-For 'collapsed descendants' { !(Row $nested) -and !(Row $leaf) }
     [IO.File]::WriteAllText((Join-Path $fixture $second), 'created after the first scan')
     $snapshot = Join-Path $cache 'disk-usage.sqlite'
     $previousWrite = [IO.File]::GetLastWriteTimeUtc($snapshot)
@@ -119,7 +138,7 @@ try {
         [IO.File]::Exists((Join-Path $fixture $first)) -and [IO.File]::Exists((Join-Path $fixture $second))
     }
     $passed = $true
-    Write-Output 'PASS: first-run scan, manual refresh, cancel, batch recycle, retention of unchecked file, and updated tree.'
+    Write-Output 'PASS: first-run scan, stable directory expansion and collapse, refresh, cancel, batch recycle, and updated tree.'
 } finally {
     if ($app -and !$app.HasExited) {
         $null = $app.CloseMainWindow()

@@ -14,8 +14,7 @@ foreach ($file in $files) {
 }
 $version = (Get-Item -LiteralPath (Join-Path $payload 'WindowsDiskManager.exe')).VersionInfo.ProductVersion
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Unexpected application version.' }
-$productRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\WindowsDiskManager'
-$installDir = Join-Path $productRoot $version
+$installDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\WindowsDiskManager'
 $null = New-Item -ItemType Directory -Path (Join-Path $installDir 'licenses') -Force
 foreach ($file in $files) {
     $source = Join-Path $payload $file

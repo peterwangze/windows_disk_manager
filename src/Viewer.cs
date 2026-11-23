@@ -8,6 +8,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -22,6 +23,7 @@ namespace UsageTree
     internal sealed class Database : IDisposable
     {
         private const string Dll = "winsqlite3.dll";
+        private readonly object gate = new object();
         private IntPtr db;
 
         [DllImport(Dll, CallingConvention=CallingConvention.Cdecl)]
@@ -64,19 +66,23 @@ namespace UsageTree
 
         internal void Query(string sql, Action<IntPtr> read, params long[] values)
         {
-            IntPtr statement;
-            if (sqlite3_prepare16_v2(db, sql, -1, out statement, IntPtr.Zero) != 0)
-                throw new IOException(Error());
-            try
+            lock (gate)
             {
-                for (int i = 0; i < values.Length; i++)
-                    if (sqlite3_bind_int64(statement, i + 1, values[i]) != 0)
-                        throw new IOException(Error());
-                int code;
-                while ((code = sqlite3_step(statement)) == 100) read(statement);
-                if (code != 101) throw new IOException(Error());
+                if (db == IntPtr.Zero) throw new ObjectDisposedException("Database");
+                IntPtr statement;
+                if (sqlite3_prepare16_v2(db, sql, -1, out statement, IntPtr.Zero) != 0)
+                    throw new IOException(Error());
+                try
+                {
+                    for (int i = 0; i < values.Length; i++)
+                        if (sqlite3_bind_int64(statement, i + 1, values[i]) != 0)
+                            throw new IOException(Error());
+                    int code;
+                    while ((code = sqlite3_step(statement)) == 100) read(statement);
+                    if (code != 101) throw new IOException(Error());
+                }
+                finally { sqlite3_finalize(statement); }
             }
-            finally { sqlite3_finalize(statement); }
         }
         internal static long Number(IntPtr st, int n) { return sqlite3_column_int64(st, n); }
         internal static long? MaybeNumber(IntPtr st, int n) { return sqlite3_column_type(st, n) == 5 ? (long?)null : Number(st, n); }
@@ -96,17 +102,18 @@ namespace UsageTree
         }
         public void Dispose()
         {
-            if (db != IntPtr.Zero) { sqlite3_close(db); db = IntPtr.Zero; }
+            lock (gate)
+                if (db != IntPtr.Zero) { sqlite3_close(db); db = IntPtr.Zero; }
         }
     }
 
     public sealed class Node : INotifyPropertyChanged
     {
         internal long Id, Files;
-        internal int Flags, Offset;
+        internal int Flags, Offset, Depth;
         internal long? Bytes, LogicalBytes;
         internal Node ParentNode;
-        internal bool Loaded;
+        internal bool Loaded, Loading;
         internal Viewer Owner;
         internal long? Serial;
         internal byte[] FileId;
@@ -115,16 +122,14 @@ namespace UsageTree
         public string Name { get; set; }
         internal bool IsDirectory;
         public bool IsMore { get; set; }
-        internal bool IsPlaceholder;
         internal long Total, Free;
         internal long? UniqueBytes;
         internal string Finished;
-        public ObservableCollection<Node> Children { get; private set; }
-        public Node() { Children = new ObservableCollection<Node>(); }
+        internal readonly List<Node> Children = new List<Node>();
         internal bool IsRoot { get { return IsDirectory && ParentNode == null; } }
         private bool UnmeasuredDirectory { get { return IsDirectory && ((Flags & 2) != 0 || ((Flags & 5) != 0 && Files == 0 && Bytes.GetValueOrDefault() == 0)); } }
         internal bool IsRemoved { get { return Recycled || (ParentNode != null && ParentNode.IsRemoved); } }
-        public bool CanReveal { get { return !IsMore && !IsPlaceholder && !IsRemoved; } }
+        public bool CanReveal { get { return !IsMore && !IsRemoved; } }
         public bool HasPickBox { get { return !IsRoot && CanReveal; } }
         private bool Covered { get { return ParentNode != null && ParentNode.Marked; } }
         public bool Marked
@@ -151,7 +156,6 @@ namespace UsageTree
             }
         }
         public string Tip { get { return IsMore ? "显示按占用空间排序的下一批项目" : FullPath; } }
-        internal int Depth { get { return ParentNode == null ? 0 : ParentNode.Depth + 1; } }
         public Thickness Indent { get { return new Thickness(Math.Min(Depth, 12) * 15, 0, 0, 0); } }
 
         private static readonly string[] GenericIcon = { "IconFile", "FileBrush" };
@@ -226,7 +230,8 @@ namespace UsageTree
         {
             get
             {
-                if (IsMore || IsPlaceholder) return "";
+                if (IsMore) return "";
+                if (Loading) return "读取中";
                 if (IsRemoved) return "已移入回收站";
                 if (IsDirectory && (Flags & 2) != 0) return "链接";
                 if ((Flags & 1) != 0) return IsDirectory ? "部分可读" : "占用未知";
@@ -261,8 +266,8 @@ namespace UsageTree
         {
             get { return Design.Brush(FlagVisibility == Visibility.Visible ? FlagTone + "TextBrush" : "InkMutedBrush"); }
         }
-        public string SizeText { get { return IsMore || IsPlaceholder ? "" : UnmeasuredDirectory ? "未统计" : FormatSize(Bytes); } }
-        public string LengthText { get { return IsMore || IsPlaceholder ? "" : UnmeasuredDirectory ? "未统计" : FormatSize(LogicalBytes); } }
+        public string SizeText { get { return IsMore ? "" : UnmeasuredDirectory ? "未统计" : FormatSize(Bytes); } }
+        public string LengthText { get { return IsMore ? "" : UnmeasuredDirectory ? "未统计" : FormatSize(LogicalBytes); } }
         public string BytesTip { get { return !UnmeasuredDirectory && Bytes.HasValue ? Bytes.Value.ToString("N0") + " 字节已分配" : "无法读取占用空间"; } }
         public string LogicalTip { get { return !UnmeasuredDirectory && LogicalBytes.HasValue ? LogicalBytes.Value.ToString("N0") + " 字节文件内容" : "未知"; } }
         public bool ShowShare { get { return CanReveal && !UnmeasuredDirectory && Bytes.HasValue && ParentNode != null && ParentNode.Bytes.GetValueOrDefault() > 0; } }
@@ -283,18 +288,19 @@ namespace UsageTree
         public bool IsOpen
         {
             get { return isOpen; }
-            set
-            {
-                if (value == isOpen) return;
-                isOpen = value;
-                if (PropertyChanged != null) PropertyChanged(this, new PropertyChangedEventArgs("IsOpen"));
-            }
+            set { if (value != isOpen && Owner != null) Owner.SetOpen(this, value); }
+        }
+        internal void SetOpenState(bool open)
+        {
+            if (open == isOpen) return;
+            isOpen = open;
+            if (PropertyChanged != null) PropertyChanged(this, new PropertyChangedEventArgs("IsOpen"));
         }
         public event PropertyChangedEventHandler PropertyChanged;
-        internal void SetExpandable()
+        public bool CanExpand { get { return IsDirectory && (Flags & 2) == 0 && (!Loaded || Children.Count != 0); } }
+        internal void PageChanged()
         {
-            if (IsDirectory && (Flags & 2) == 0)
-                Children.Add(new Node { IsPlaceholder = true, Name = "" });
+            if (PropertyChanged != null) PropertyChanged(this, new PropertyChangedEventArgs(""));
         }
     }
 
@@ -351,31 +357,33 @@ namespace UsageTree
         private const int PageSize = 160;
         private Database db;
         private readonly Window window;
-        private readonly TreeView tree;
+        private readonly ListBox tree;
         private readonly TextBlock selection;
         private readonly List<Node> roots = new List<Node>();
+        private readonly ObservableCollection<Node> rows = new ObservableCollection<Node>();
         private Node hovered;
 
         internal Viewer(Window window, string dataDirectory)
         {
             this.window = window;
             this.dataDirectory = dataDirectory;
-            tree = (TreeView)window.FindName("UsageTree");
+            tree = (ListBox)window.FindName("UsageTree");
+            tree.ItemsSource = rows;
             selection = (TextBlock)window.FindName("Selection");
             selection.Text = "选择一项，查看完整路径、空间和文件数。";
             selection.ToolTip = "选择一项，查看完整路径、空间和文件数。";
-            tree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(Expanded));
             tree.AddHandler(ButtonBase.ClickEvent, new RoutedEventHandler(ActionClick));
+            tree.PreviewKeyDown += NavigateTree;
             tree.MouseMove += delegate(object sender, MouseEventArgs args) { SetHovered(HoverNode(args)); };
             tree.MouseLeave += delegate { SetHovered(null); };
-            tree.SelectedItemChanged += delegate(object sender, RoutedPropertyChangedEventArgs<object> args)
+            tree.SelectionChanged += delegate(object sender, SelectionChangedEventArgs args)
             {
-                Node item = args.NewValue as Node;
+                Node item = tree.SelectedItem as Node;
                 if (item == null || !item.CanReveal) return;
                 string details = item.FullPath + (item.IsDirectory && item.SizeText != "未统计" ? "    ·    " + item.Files.ToString("N0") + " 个文件" : "");
                 if (item.IsRoot && item.UniqueBytes.HasValue)
                     details += "    ·    已统计文件占用（硬链接去重） " + Node.FormatSize(item.UniqueBytes);
-                if (item.FlagLabel != "") details += "    ·    " + item.FlagLabel;
+                if (!item.Loading && item.FlagLabel != "") details += "    ·    " + item.FlagLabel;
                 if (item.IsDirectory && (item.Flags & 8) != 0) details += "    ·    包含已跳过的目录链接";
                 selection.Text = details;
                 selection.ToolTip = details;
@@ -393,7 +401,7 @@ namespace UsageTree
             DependencyObject element = tree.InputHitTest(args.GetPosition(tree)) as DependencyObject;
             while (element != null)
             {
-                var container = element as TreeViewItem;
+                var container = element as ListBoxItem;
                 if (container != null)
                 {
                     if (container.IsSelected) return null;
@@ -426,22 +434,29 @@ namespace UsageTree
                         LogicalBytes = Database.MaybeNumber(s,3), Files = Database.Number(s,4), Flags = (int)Database.Number(s,5),
                         Total = Database.Number(s,6), Free = Database.Number(s,7), Finished = Database.Text(s,8), UniqueBytes = Database.MaybeNumber(s,9),
                         Serial = Database.MaybeNumber(s,10), Owner = this, IsDirectory = true };
-                    item.SetExpandable();
                     result.Add(item);
                 });
             if (result.Count == 0) throw new InvalidDataException("快照中没有可用的磁盘。");
             return result;
         }
 
+        private List<Node> ReadSnapshot(Database source, out bool identities)
+        {
+            var items = ReadRoots(source, out identities);
+            foreach (var item in items.Where(n => n.CanExpand)) AppendPage(item, ReadPage(source, item, identities));
+            return items;
+        }
+
         private void Display(List<Node> incoming)
         {
             picked.Clear();
-            tree.ItemsSource = null;
+            SetHovered(null);
+            rows.Clear();
             roots.Clear();
             roots.AddRange(incoming);
             ((WrapPanel)window.FindName("DriveCards")).Children.Clear();
             ((FrameworkElement)window.FindName("Empty")).Visibility = Visibility.Collapsed;
-            tree.ItemsSource = roots;
+            foreach (var item in roots) rows.Add(item);
             foreach (var item in roots) AddCard(item);
             AddSummaryCard(roots);
             string finish = roots.Select(item => item.Finished).OrderBy(x => x, StringComparer.Ordinal).Last();
@@ -529,80 +544,150 @@ namespace UsageTree
 
         private void ShowRoot(Node item)
         {
-            // Bring the second volume into view even when the first tree has many expanded descendants.
-            if (!item.Loaded) LoadPage(item);
-            tree.ApplyTemplate();
-            var rootPanel = FindVisual<VirtualizingStackPanel>(tree);
-            if (rootPanel != null) rootPanel.BringIndexIntoViewPublic(roots.IndexOf(item));
-            item.IsOpen = true;
-            tree.UpdateLayout();
-            var container = tree.ItemContainerGenerator.ContainerFromItem(item) as TreeViewItem;
-            if (container == null)
+            SetOpen(item, true);
+            tree.SelectedItem = item;
+            var scroll = FindScrollViewer(tree);
+            if (scroll == null) tree.ScrollIntoView(item);
+            else
             {
-                tree.ApplyTemplate();
-                tree.UpdateLayout();
-                var scroll = FindVisual<ScrollViewer>(tree);
-                if (scroll != null)
-                {
-                    if (item == roots[0]) scroll.ScrollToTop(); else scroll.ScrollToBottom();
-                    tree.UpdateLayout();
-                }
-                container = tree.ItemContainerGenerator.ContainerFromItem(item) as TreeViewItem;
-            }
-            if (container != null)
-            {
-                container.IsSelected = true;
-                var header = container.Template.FindName("PART_Header", container) as FrameworkElement;
-                if (header != null)
-                {
-                    // Let WPF place the header and its children together. Writing a pixel
-                    // offset back during layout can endlessly re-anchor the virtualized tree.
-                    double height = Math.Max(header.ActualHeight, tree.ActualHeight);
-                    header.BringIntoView(new Rect(0, 0, header.ActualWidth, height));
-                }
+                // Flat rows have a fixed height. Jump directly to the requested
+                // header without realizing preceding rows or forcing layout.
+                double scale = VisualTreeHelper.GetDpi(tree).DpiScaleY;
+                double height = (double)window.FindResource("DirectoryRowHeight");
+                scroll.ScrollToVerticalOffset(rows.IndexOf(item) * Math.Round(height * scale) / scale);
             }
         }
 
-        private static T FindVisual<T>(DependencyObject source) where T : DependencyObject
+        private static ScrollViewer FindScrollViewer(DependencyObject parent)
         {
-            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(source); i++)
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
             {
-                var child = VisualTreeHelper.GetChild(source, i);
-                if (child is T) return (T)child;
-                var found = FindVisual<T>(child);
-                if (found != null) return found;
+                var child = VisualTreeHelper.GetChild(parent, i);
+                var scroll = child as ScrollViewer ?? FindScrollViewer(child);
+                if (scroll != null) return scroll;
             }
             return null;
         }
 
-        private void Expanded(object sender, RoutedEventArgs e)
+        private void SelectRow(Node item, bool focus)
         {
-            var container = e.OriginalSource as TreeViewItem;
-            var item = container == null ? null : container.DataContext as Node;
-            if (item != null && item.IsDirectory && !item.Loaded) LoadPage(item);
+            tree.SelectedItem = item;
+            tree.ScrollIntoView(item);
+            if (focus) window.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(delegate
+            {
+                var row = tree.ItemContainerGenerator.ContainerFromItem(item) as ListBoxItem;
+                if (row != null && tree.SelectedItem == item) row.Focus();
+            }));
         }
 
-        private void LoadPage(Node item)
+        private int InsertChildren(Node parent, int index, int start = 0)
         {
-            if (db == null) return;
-            try { AppendPage(item, ReadPage(db, item, hasIdentities)); }
-            catch (Exception ex) { MessageBox.Show(window, "无法读取此目录。\n" + ex.Message, "Windows 磁盘空间管理器"); }
+            for (int i = start; i < parent.Children.Count; i++)
+            {
+                var child = parent.Children[i];
+                rows.Insert(index++, child);
+                if (child.IsOpen) index = InsertChildren(child, index);
+            }
+            return index;
+        }
+
+        internal void SetOpen(Node item, bool open)
+        {
+            if (open == item.IsOpen || !item.CanExpand) return;
+            int index = rows.IndexOf(item);
+            if (index < 0) return;
+            item.SetOpenState(open);
+            if (open)
+            {
+                if (item.Loaded) InsertChildren(item, index + 1);
+                else LoadPage(item);
+                return;
+            }
+            var selected = tree.SelectedItem as Node;
+            if (selected != null && DescendsFrom(selected, item)) tree.SelectedItem = item;
+            int end = index + 1;
+            while (end < rows.Count && rows[end].Depth > item.Depth) end++;
+            for (int i = end - 1; i > index; i--) rows.RemoveAt(i);
+        }
+
+        private void NavigateTree(object sender, KeyEventArgs e)
+        {
+            if (scan != null || e.OriginalSource is ButtonBase) return;
+            var item = tree.SelectedItem as Node;
+            if (item == null) return;
+            if (e.Key == Key.Right && item.CanExpand)
+            {
+                if (!item.IsOpen) SetOpen(item, true);
+                else if (item.Children.Count != 0) SelectRow(item.Children[0], true);
+            }
+            else if (e.Key == Key.Left && item.IsOpen) SetOpen(item, false);
+            else if (e.Key == Key.Left && item.ParentNode != null) SelectRow(item.ParentNode, true);
+            else if (e.Key == Key.Enter && item.IsMore) LoadPage(item.ParentNode);
+            else if (e.Key == Key.Enter && item.CanExpand) SetOpen(item, !item.IsOpen);
+            else return;
+            e.Handled = true;
+        }
+
+        private async void LoadPage(Node item)
+        {
+            var source = db;
+            if (source == null || item.Loading) return;
+            item.Loading = true;
+            item.PageChanged();
+            bool identities = hasIdentities;
+            try
+            {
+                var next = await Task.Run(delegate { return ReadPage(source, item, identities); });
+                await Dispatcher.Yield(DispatcherPriority.Background);
+                if (disposed || source != db) return;
+                var marker = item.Children.LastOrDefault(n => n.IsMore);
+                int start = item.Children.Count - (marker == null ? 0 : 1);
+                int at = item.IsOpen ? rows.IndexOf(item) + 1 : 0;
+                bool markerSelected = marker != null && tree.SelectedItem == marker;
+                AppendPage(item, next);
+                if (item.Children.Count == 0) item.SetOpenState(false);
+                if (at == 0) return;
+                if (marker != null)
+                {
+                    at = rows.IndexOf(marker);
+                    if (at < 0) return;
+                    rows.RemoveAt(at);
+                }
+                InsertChildren(item, at, start);
+                if (markerSelected && item.Children.Count > start) SelectRow(item.Children[start], tree.IsKeyboardFocusWithin);
+            }
+            catch (Exception ex)
+            {
+                if (!disposed && source == db)
+                {
+                    if (!item.Loaded) item.SetOpenState(false);
+                    SetStatus("无法读取此目录。 " + ex.GetBaseException().Message);
+                }
+            }
+            finally
+            {
+                item.Loading = false;
+                item.PageChanged();
+            }
         }
 
         private List<Node> ReadPage(Database source, Node item, bool identities)
         {
             string identity = identities ? "fsid" : "NULL";
-            string sql = "SELECT id,1 AS kind,name,bytes,logical_bytes,flags,files," + identity + " FROM dirs WHERE parent=?1 " +
-                "UNION ALL SELECT id,0 AS kind,name,bytes,logical_bytes,flags,0 AS files," + identity + " FROM entries WHERE parent=?1 " +
-                "ORDER BY bytes DESC,kind DESC,name,id LIMIT ?2 OFFSET ?3";
+            // Cap each ordered input before merging. A large set of siblings with
+            // the same allocation then needs only the two page prefixes sorted.
+            string sql = "WITH folders AS (SELECT id,1 AS kind,name,bytes,logical_bytes,flags,files," + identity +
+                " FROM dirs WHERE parent=?1 ORDER BY bytes DESC,name,id LIMIT ?2+?3), " +
+                "files AS (SELECT id,0 AS kind,name,bytes,logical_bytes,flags,0 AS files," + identity +
+                " FROM entries WHERE parent=?1 ORDER BY bytes DESC,name,id LIMIT ?2+?3) " +
+                "SELECT * FROM folders UNION ALL SELECT * FROM files ORDER BY bytes DESC,kind DESC,name,id LIMIT ?2 OFFSET ?3";
             var next = new List<Node>();
             source.Query(sql, delegate(IntPtr s)
             {
                 var child = new Node { Id = Database.Number(s,0), IsDirectory = Database.Number(s,1) == 1,
                     Name = Database.Text(s,2), Bytes = Database.MaybeNumber(s,3), LogicalBytes = Database.MaybeNumber(s,4),
                     Flags = (int)Database.Number(s,5), Files = Database.Number(s,6), ParentNode = item, FileId = Database.Identity(s,7),
-                    Serial = item.Serial, Owner = this };
-                child.SetExpandable();
+                    Serial = item.Serial, Owner = this, Depth = item.Depth + 1 };
                 next.Add(child);
             }, item.Id, PageSize + 1, item.Offset);
             return next;
@@ -610,16 +695,14 @@ namespace UsageTree
 
         private static void AppendPage(Node item, List<Node> next)
         {
-            var oldMarker = item.Children.LastOrDefault(n => n.IsMore || n.IsPlaceholder);
-            // Insert before the placeholder to keep a populated directory expandable throughout the change.
-            int index = oldMarker == null ? item.Children.Count : item.Children.IndexOf(oldMarker);
+            if (item.Children.Count != 0 && item.Children[item.Children.Count - 1].IsMore)
+                item.Children.RemoveAt(item.Children.Count - 1);
             int count = Math.Min(PageSize, next.Count);
-            for (int i = 0; i < count; i++) item.Children.Insert(index++, next[i]);
-            if (oldMarker != null) item.Children.Remove(oldMarker);
+            for (int i = 0; i < count; i++) item.Children.Add(next[i]);
             item.Offset += count;
             item.Loaded = true;
             if (next.Count > PageSize)
-                item.Children.Add(new Node { IsMore = true, Name = "显示更多项目", ParentNode = item });
+                item.Children.Add(new Node { IsMore = true, Name = "显示更多项目", ParentNode = item, Depth = item.Depth + 1 });
         }
 
         private void ActionClick(object sender, RoutedEventArgs e)

@@ -10,6 +10,8 @@ Windows 磁盘空间管理器用一棵可展开的文件树展示每个磁盘、
 
 从 [最新的 GitHub Release](https://github.com/peterwangze/windows_disk_manager/releases/latest) 下载文件名以 `-win-x64-Setup.exe` 结尾的安装程序，双击安装。之后可从开始菜单搜索「磁盘空间管理器」。安装作用于当前 Windows 用户，升级会保留已有的扫描快照。
 
+默认安装路径为 `%LOCALAPPDATA%\Programs\WindowsDiskManager`。通过「浏览」可直接选择或新建实际安装目录，例如 `D:\app\WindowsDiskManager`。后续升级会使用已登记的安装路径。旧版自动生成的版本号目录会在首次升级时改用同一安装位置下的固定应用目录。
+
 适用于安装了 .NET Framework 4.8 的 64 位 Windows 10 / 11。使用便携版时，请完整解压同一 Release 的 ZIP 包，保留 `DiskScanner.exe` 和 `scanner-runtime` 文件夹，然后运行 `WindowsDiskManager.exe`。
 
 ## 版本与更新
